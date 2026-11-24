@@ -1,0 +1,254 @@
+<resources>
+    <string name="app_name">Road Awareness</string>
+
+    <!-- Modes & Controls -->
+    <string name="mode_driving">Driving</string>
+    <string name="mode_walking">Walking</string>
+    <string name="action_search">Search</string>
+    <string name="action_recenter">Recenter</string>
+    <string name="action_settings">Settings</string>
+    <string name="action_debug">Debug</string>
+    <string name="action_close">Close</string>
+    <string name="action_clear">Clear</string>
+    <string name="action_grant_permission">Enable Location</string>
+
+    <!-- Status Chips & States -->
+    <string name="gps_accuracy_format">GPS ±%1$dm</string>
+    <string name="status_gps_searching">GPS</string>
+    <string name="status_gps_denied">Location</string>
+    <string name="status_offline_cached">Offline</string>
+    <string name="status_slow_data">Slow data</string>
+    <string name="status_basic_data">Basic data</string>
+    <string name="status_loading_graph">Loading</string>
+    <string name="status_uncertain">Uncertain</string>
+    <string name="status_off_road">Not on a road</string>
+    <string name="status_mock_active">Mock</string>
+    <string name="roads_searching">Searching roads…</string>
+    <string name="roads_unavailable_retrying">Road data unavailable, retrying</string>
+    <string name="no_features_ahead">No features within %1$s</string>
+    <string name="current_road_unknown">غير معروف / unknown</string>
+    <string name="off_road_header_dash">—</string>
+    <string name="sample_badge">Debug</string>
+
+    <!-- Off-road UI -->
+    <string name="offroad_nearest_roads">Nearest roads</string>
+    <string name="offroad_closest_point_format">%1$s · closest point</string>
+    <string name="offroad_no_roads_nearby">No roads within %1$s</string>
+    <string name="offroad_choose_direction">Choose direction along road</string>
+    <string name="offroad_direction_format">Towards %1$s (%2$d°)</string>
+    <string name="offroad_direction_features_format">%1$d features ahead</string>
+    <string name="dir_behind">Behind</string>
+
+    <!-- Branch Status & Labels -->
+    <string name="branch_open">Open</string>
+    <string name="branch_blocked">Blocked</string>
+    <string name="branch_blocked_reason">One-way against you</string>
+    <string name="branch_unverified">Unverified</string>
+    <string name="unknown_value">Unknown</string>
+    <string name="unnamed_branch">Unnamed</string>
+    <string name="leads_to_format">Leads to %1$s</string>
+    <string name="leads_to_unknown">Unknown</string>
+    <string name="dir_left">Left</string>
+    <string name="dir_right">Right</string>
+    <string name="dir_ahead">Ahead</string>
+    <string name="more_branches_format">+%1$d</string>
+    <string name="upcoming_features_title">Upcoming features</string>
+    <string name="parallel_candidates_format">%1$s / %2$s</string>
+
+    <!-- Feature Types -->
+    <string name="feature_four_way">4-Way Junction</string>
+    <string name="feature_multi_way">5-Way+ Junction</string>
+    <string name="feature_t_junction">T-Junction</string>
+    <string name="feature_y_junction">Y-Junction</string>
+    <string name="feature_roundabout">Roundabout</string>
+    <string name="feature_mini_roundabout">Mini Roundabout</string>
+    <string name="feature_fork">Road Fork</string>
+    <string name="feature_merge">Road Merge</string>
+    <string name="feature_on_ramp">On-Ramp</string>
+    <string name="feature_off_ramp">Off-Ramp</string>
+    <string name="feature_bridge">Bridge</string>
+    <string name="feature_tunnel">Tunnel</string>
+    <string name="feature_overpass_above">Overpass Above</string>
+    <string name="feature_underpass_below">Underpass Below</string>
+    <string name="feature_u_turn">U-Turn</string>
+    <string name="feature_dead_end">Dead End</string>
+    <string name="feature_cul_de_sac">Cul-de-Sac</string>
+    <string name="feature_service_road">Service Road</string>
+    <string name="feature_sharp_curve">Sharp Curve</string>
+    <string name="feature_footpath">Footpath</string>
+    <string name="feature_crosswalk">Crosswalk</string>
+    <string name="feature_footbridge">Footbridge</string>
+    <string name="feature_toll_plaza">Toll Plaza</string>
+    <string name="feature_checkpoint">Checkpoint</string>
+    <string name="feature_barrier">Road Barrier</string>
+    <string name="feature_road_works">Road Works</string>
+    <string name="feature_staggered_junction">Staggered Junction</string>
+    <string name="feature_divided_road">Divided Road</string>
+    <string name="feature_median_opening">Median Opening</string>
+    <string name="feature_frontage_road">Frontage Road</string>
+    <string name="feature_interchange">Interchange</string>
+    <string name="feature_cloverleaf">Cloverleaf Interchange</string>
+    <string name="feature_diamond">Diamond Interchange</string>
+    <string name="feature_trumpet">Trumpet Interchange</string>
+
+    <!-- Feature Subtitles -->
+    <string name="ramp_joins_from_left">Joins from left</string>
+    <string name="ramp_joins_from_right">Joins from right</string>
+    <string name="merge_into_format">Merge into %1$s</string>
+    <string name="branch_blocked_road_works">Road works / closed ahead</string>
+    <string name="overpass_above_subtitle">Bridge over you ahead</string>
+    <string name="underpass_below_subtitle">You pass over a road/tunnel</string>
+    <string name="staggered_offset_format">Offset %1$s</string>
+    <string name="median_opening_subtitle">Median opening / U-turn</string>
+    <string name="frontage_road_left">Service/frontage road (left)</string>
+    <string name="frontage_road_right">Service/frontage road (right)</string>
+    <string name="inspector_feature_census">Feature census (1.5 km)</string>
+    <string name="inspector_census_empty">No features within 1.5 km</string>
+    <string name="inspector_jump">Jump</string>
+
+    <!-- Units -->
+    <string name="distance_meters_format">%1$d m</string>
+    <string name="distance_km_format">%1$.1f km</string>
+    <string name="distance_feet_format">%1$d ft</string>
+    <string name="distance_miles_format">%1$.1f mi</string>
+
+    <!-- Pipeline & GPS Status -->
+    <string name="roads_failed_stage">Road data failed: %1$s</string>
+    <string name="action_retry">Retry</string>
+    <string name="waiting_for_gps">Waiting for GPS…</string>
+
+    <!-- Search & Pins -->
+    <string name="search_hint">Search streets, places, shops…</string>
+    <string name="search_empty">Enter a street or place name to check road distance.</string>
+    <string name="search_no_results">No matching places found.</string>
+    <string name="distance_label_road">road distance</string>
+    <string name="distance_label_fastest">fastest-route distance</string>
+    <string name="distance_label_unavailable">unavailable</string>
+    <string name="pins_title">Pins</string>
+    <string name="pins_sort_nearest">Nearest</string>
+    <string name="pins_sort_newest">Newest first</string>
+    <string name="pins_clear_all">Clear all</string>
+    <string name="pins_empty">No saved pins yet.</string>
+    <string name="action_route">Route</string>
+    <string name="action_clear_route">Clear route</string>
+    <string name="action_remove">Remove</string>
+    <string name="floating_pins_desc">Saved pins</string>
+
+    <!-- Map Attribution -->
+    <string name="attribution_compact">© OSM · OpenFreeMap</string>
+    <string name="attribution_dialog_title">Map Data &amp; Style Attribution</string>
+    <string name="attribution_dialog_body">Map data © OpenStreetMap contributors (ODbL).\nVector style &amp; tiles by OpenFreeMap (keyless).\nFallback raster tiles by OpenStreetMap.</string>
+    <string name="attribution_content_desc">Map attribution information</string>
+
+    <!-- Settings & Graph Inspector -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_theme">Appearance</string>
+    <string name="theme_auto">Auto</string>
+    <string name="theme_light">Light</string>
+    <string name="theme_dark">Night</string>
+    <string name="settings_units">Units</string>
+    <string name="units_auto">Auto</string>
+    <string name="units_metric">Metric</string>
+    <string name="units_imperial">Imperial</string>
+    <string name="settings_glass_blur_title">Real glass blur (experimental)</string>
+    <string name="settings_glass_blur_subtitle">Live map backdrop blur on Android 12+ (off by default)</string>
+    <string name="settings_reduce_transparency_title">Reduce transparency</string>
+    <string name="settings_reduce_transparency_subtitle">Use solid opaque panels instead of translucent glass</string>
+    <string name="settings_tts_title">Arabic voice alerts</string>
+    <string name="settings_tts_subtitle">Optional spoken upcoming feature cues (off by default)</string>
+    <string name="settings_developer_title">Developer</string>
+    <string name="settings_show_inspector">Show Graph Inspector</string>
+    <string name="inspector_show_graph_edges">Show graph edges on map</string>
+    <string name="settings_mock_mode">Mock location mode</string>
+    <string name="settings_reset_overrides">Reset debug overrides</string>
+    <string name="settings_inspector_title">Graph Inspector &amp; Mock Tester</string>
+    <string name="settings_inspector_subtitle">Tap map to set position + heading and inspect raw OSM tags</string>
+    <string name="settings_clear_cache">Clear cached road tiles</string>
+    <string name="settings_cache_count_format">%1$d cached corridor cells</string>
+    <string name="inspector_copy_report">Copy</string>
+    <string name="inspector_copied">Copied</string>
+    <string name="inspector_report_title">Report</string>
+    <string name="inspector_report_clipboard_note">Clipboard may not reach your device when running in a cloud emulator: take a screenshot</string>
+    <string name="inspector_mode_live">Live GPS</string>
+    <string name="inspector_mode_mock">Mock</string>
+    <string name="inspector_snap_road">Snap</string>
+    <string name="inspector_debug_override">DEBUG OVERRIDE</string>
+    <string name="inspector_controls_tab">Controls</string>
+    <string name="inspector_details_tab">Details</string>
+    <string name="inspector_test_overpass">Test Overpass</string>
+    <string name="inspector_testing_overpass">Testing…</string>
+    <string name="inspector_reload_road_data">Reload road data</string>
+    <string name="inspector_block_overpass">Block Overpass</string>
+    <string name="inspector_block_tiles">Block tiles</string>
+    <string name="inspector_slow_network">Slow network (3–8s)</string>
+    <string name="inspector_force_overpass_error">Force Overpass error</string>
+    <string name="inspector_error_none">Off</string>
+    <string name="inspector_clear_caches">Clear caches</string>
+    <string name="settings_offline_mode">Offline (block all network)</string>
+    <string name="snackbar_inspector_on">Inspector on</string>
+    <string name="snackbar_inspector_off">Inspector off</string>
+    <string name="inspector_along_road">Along road</string>
+    <string name="inspector_sim_drive">Simulate drive</string>
+    <string name="inspector_sim_play">Play</string>
+    <string name="inspector_sim_pause">Pause</string>
+    <string name="inspector_sim_speed_format">%1$d km/h</string>
+    <string name="inspector_sim_speed_mph_format">%1$d mph</string>
+    <string name="inspector_sim_dead_end">Stopped at dead end</string>
+    <string name="inspector_accuracy_format">Accuracy ±%1$d m</string>
+    <string name="inspector_jitter">Jitter</string>
+    <string name="inspector_save_spot">Save spot</string>
+    <string name="inspector_save_spot_title">Save Test Spot</string>
+    <string name="inspector_spot_name_hint">Spot name</string>
+    <string name="inspector_spots_title">Saved test spots</string>
+    <string name="inspector_spots_empty">No saved test spots yet</string>
+    <string name="inspector_restore_default_spots">Restore default spots</string>
+    <string name="mock_no_position_prompt">Tap the map or choose a test spot</string>
+    <string name="inspector_pipeline_summary_prefix">Pipeline summary:</string>
+    <string name="inspector_spot_save_short">Save</string>
+    <string name="inspector_live_jumps_title">Ignored Live GPS jumps (&gt;500m in &lt;2s)</string>
+    <string name="inspector_orientation_title">Orientation &amp; Window</string>
+    <string name="inspector_orientation_warning">Landscape requested, but host/emulator kept Portrait orientation</string>
+    <string name="settings_dev_orientation">Orientation</string>
+    <string name="orientation_auto">Auto</string>
+    <string name="orientation_landscape">Landscape</string>
+    <string name="orientation_portrait">Portrait</string>
+    <string name="sim_branch_selected">Turn target</string>
+    <string name="action_save">Save</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="settings_layout_title">Layout</string>
+    <string name="settings_landscape_panel_side">Landscape panel side</string>
+    <string name="side_left">Left</string>
+    <string name="side_right">Right</string>
+    <string name="panel_expand">Expand panel</string>
+    <string name="panel_collapse">Collapse panel</string>
+    <string name="no_map_data_here">No map data here</string>
+    <string name="zoom_in_tap_road">Zoom in and tap a road</string>
+    <string name="inspector_ping_overpass">Ping Overpass</string>
+    <string name="status_updating">Updating</string>
+
+    <!-- Phase 5 & 6: Horizon, Timeline, Landmarks & Find on my road -->
+    <string name="settings_horizon">Road-ahead horizon</string>
+    <string name="settings_show_minor_junctions">Show minor junctions</string>
+    <string name="settings_show_minor_junctions_sub">Include residential &amp; unnamed side alleys along main roads</string>
+    <string name="settings_landmarks_ahead">Landmarks ahead</string>
+    <string name="settings_landmarks_ahead_sub">Show notable stations, hospitals, and landmarks along corridor</string>
+    <string name="timeline_title">Road ahead timeline</string>
+    <string name="timeline_loaded_format">%1$s loaded</string>
+    <string name="timeline_hidden_minor_format">Hidden: %1$d minor</string>
+    <string name="action_overview">Overview</string>
+    <string name="action_exit_overview">Exit overview</string>
+    <string name="landmarks_ahead_format">Landmarks ahead (%1$d)</string>
+    <string name="search_scope_on_road">On my road</string>
+    <string name="search_scope_everywhere">Everywhere</string>
+    <string name="search_moving_caution">Moving — glance only, keep eyes on road</string>
+    <string name="search_recent_title">Recent</string>
+    <string name="relation_ahead">Ahead</string>
+    <string name="relation_behind_passed_format">Passed %1$s ago</string>
+    <string name="relation_parallel">Parallel</string>
+    <string name="entry_open">Open</string>
+    <string name="entry_indirect">Indirect</string>
+    <string name="entry_blocked">Blocked</string>
+    <string name="entry_unverified">Unverified</string>
+    <string name="found_match_badge">Found</string>
+    <string name="found_target_offscreen_format">Found · %1$s</string>
+</resources>

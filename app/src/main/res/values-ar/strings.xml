@@ -1,0 +1,254 @@
+<resources>
+    <string name="app_name">وعي الطريق</string>
+
+    <!-- Modes & Controls -->
+    <string name="mode_driving">قيادة</string>
+    <string name="mode_walking">مشي</string>
+    <string name="action_search">بحث</string>
+    <string name="action_recenter">توسيط</string>
+    <string name="action_settings">الإعدادات</string>
+    <string name="action_debug">تشخيص</string>
+    <string name="action_close">إغلاق</string>
+    <string name="action_clear">مسح</string>
+    <string name="action_grant_permission">تفعيل الموقع</string>
+
+    <!-- Status Chips & States -->
+    <string name="gps_accuracy_format">GPS ±%1$dm</string>
+    <string name="status_gps_searching">GPS</string>
+    <string name="status_gps_denied">الموقع</string>
+    <string name="status_offline_cached">غير متصل</string>
+    <string name="status_slow_data">بيانات بطيئة</string>
+    <string name="status_basic_data">بيانات أساسية</string>
+    <string name="status_loading_graph">تحميل</string>
+    <string name="status_uncertain">غير مؤكد</string>
+    <string name="status_off_road">لست على طريق</string>
+    <string name="status_mock_active">تجريبي</string>
+    <string name="roads_searching">جارٍ البحث عن الطرق…</string>
+    <string name="roads_unavailable_retrying">بيانات الطرق غير متوفرة، جارٍ إعادة المحاولة</string>
+    <string name="no_features_ahead">لا معالم ضمن %1$s</string>
+    <string name="current_road_unknown">غير معروف / unknown</string>
+    <string name="off_road_header_dash">—</string>
+    <string name="sample_badge">تشخيص</string>
+
+    <!-- Off-road UI -->
+    <string name="offroad_nearest_roads">أقرب الطرق</string>
+    <string name="offroad_closest_point_format">%1$s · أقرب نقطة</string>
+    <string name="offroad_no_roads_nearby">لا طرق ضمن %1$s</string>
+    <string name="offroad_choose_direction">اختر الاتجاه على الطريق</string>
+    <string name="offroad_direction_format">باتجاه %1$s (%2$d°)</string>
+    <string name="offroad_direction_features_format">%1$d معالم أمامك</string>
+    <string name="dir_behind">خلف</string>
+
+    <!-- Branch Status & Labels -->
+    <string name="branch_open">مفتوح</string>
+    <string name="branch_blocked">مغلق</string>
+    <string name="branch_blocked_reason">اتجاه واحد معاكس</string>
+    <string name="branch_unverified">غير متحقق</string>
+    <string name="unknown_value">غير معروف</string>
+    <string name="unnamed_branch">فرع بلا اسم</string>
+    <string name="leads_to_format">يؤدي إلى %1$s</string>
+    <string name="leads_to_unknown">غير معروف</string>
+    <string name="dir_left">يسار</string>
+    <string name="dir_right">يمين</string>
+    <string name="dir_ahead">أمام</string>
+    <string name="more_branches_format">+%1$d</string>
+    <string name="upcoming_features_title">المعالم القادمة</string>
+    <string name="parallel_candidates_format">%1$s / %2$s</string>
+
+    <!-- Feature Types -->
+    <string name="feature_four_way">تقاطع رباعي</string>
+    <string name="feature_multi_way">تقاطع متعدد</string>
+    <string name="feature_t_junction">تقاطع T</string>
+    <string name="feature_y_junction">تقاطع Y</string>
+    <string name="feature_roundabout">دوار</string>
+    <string name="feature_mini_roundabout">دوار صغير</string>
+    <string name="feature_fork">تفرع طريق</string>
+    <string name="feature_merge">اندماج طريق</string>
+    <string name="feature_on_ramp">منحدر دخول</string>
+    <string name="feature_off_ramp">مخرج منحدر</string>
+    <string name="feature_bridge">جسر</string>
+    <string name="feature_tunnel">نفق</string>
+    <string name="feature_overpass_above">جسر علوي</string>
+    <string name="feature_underpass_below">معبر سفلي</string>
+    <string name="feature_u_turn">التفاف للخلف</string>
+    <string name="feature_dead_end">طريق مسدود</string>
+    <string name="feature_cul_de_sac">نهاية دائرية</string>
+    <string name="feature_service_road">طريق خدمة</string>
+    <string name="feature_sharp_curve">منعطف حاد</string>
+    <string name="feature_footpath">ممر مشاة</string>
+    <string name="feature_crosswalk">معبر مشاة</string>
+    <string name="feature_footbridge">جسر مشاة</string>
+    <string name="feature_toll_plaza">بوابة رسوم</string>
+    <string name="feature_checkpoint">نقطة تفتيش</string>
+    <string name="feature_barrier">حاجز طريق</string>
+    <string name="feature_road_works">أعمال طريق</string>
+    <string name="feature_staggered_junction">تقاطع متدرج</string>
+    <string name="feature_divided_road">طريق مفصول</string>
+    <string name="feature_median_opening">فتحة دوران</string>
+    <string name="feature_frontage_road">طريق خدمة موازٍ</string>
+    <string name="feature_interchange">تقاطع حُر</string>
+    <string name="feature_cloverleaf">تقاطع ورقة برسيم</string>
+    <string name="feature_diamond">تقاطع ماسي</string>
+    <string name="feature_trumpet">تقاطع بوق</string>
+
+    <!-- Feature Subtitles -->
+    <string name="ramp_joins_from_left">يندمج من اليسار</string>
+    <string name="ramp_joins_from_right">يندمج من اليمين</string>
+    <string name="merge_into_format">اندماج في %1$s</string>
+    <string name="branch_blocked_road_works">أعمال طريق / مغلق أمامك</string>
+    <string name="overpass_above_subtitle">جسر يمر فوقك أمامك</string>
+    <string name="underpass_below_subtitle">تمر فوق طريق أو نفق</string>
+    <string name="staggered_offset_format">تباعد %1$s</string>
+    <string name="median_opening_subtitle">فتحة دوران بالجزيرة</string>
+    <string name="frontage_road_left">طريق خدمة / موازٍ (يسار)</string>
+    <string name="frontage_road_right">طريق خدمة / موازٍ (يمين)</string>
+    <string name="inspector_feature_census">إحصاء المعالم (1.5 كم)</string>
+    <string name="inspector_census_empty">لا معالم ضمن 1.5 كم</string>
+    <string name="inspector_jump">انتقال</string>
+
+    <!-- Units -->
+    <string name="distance_meters_format">%1$d م</string>
+    <string name="distance_km_format">%1$.1f كم</string>
+    <string name="distance_feet_format">%1$d قدم</string>
+    <string name="distance_miles_format">%1$.1f ميل</string>
+
+    <!-- Pipeline & GPS Status -->
+    <string name="roads_failed_stage">تعذر تحميل بيانات الطرق: %1$s</string>
+    <string name="action_retry">إعادة المحاولة</string>
+    <string name="waiting_for_gps">في انتظار إشارة GPS…</string>
+
+    <!-- Search & Pins -->
+    <string name="search_hint">ابحث عن شوارع أو أماكن أو متاجر…</string>
+    <string name="search_empty">أدخل اسم شارع أو مكان لحساب المسافة عبر الطريق.</string>
+    <string name="search_no_results">لم يتم العثور على نتائج مطابقة.</string>
+    <string name="distance_label_road">مسافة الطريق</string>
+    <string name="distance_label_fastest">مسافة أسرع مسار</string>
+    <string name="distance_label_unavailable">غير متاح</string>
+    <string name="pins_title">الدبابيس</string>
+    <string name="pins_sort_nearest">الأقرب</string>
+    <string name="pins_sort_newest">الأحدث أولاً</string>
+    <string name="pins_clear_all">مسح الكل</string>
+    <string name="pins_empty">لا توجد دبابيس محفوظة.</string>
+    <string name="action_route">مسار</string>
+    <string name="action_clear_route">إلغاء المسار</string>
+    <string name="action_remove">إزالة</string>
+    <string name="floating_pins_desc">الدبابيس المحفوظة</string>
+
+    <!-- Map Attribution -->
+    <string name="attribution_compact">© OSM · OpenFreeMap</string>
+    <string name="attribution_dialog_title">مصدر بيانات الخريطة والنمط</string>
+    <string name="attribution_dialog_body">بيانات الخريطة © مساهمو OpenStreetMap (ODbL).\nالنمط المتجهي والبلاطات من OpenFreeMap (بدون مفتاح).\nالبلاطات البديلة من OpenStreetMap.</string>
+    <string name="attribution_content_desc">معلومات إسناد الخريطة</string>
+
+    <!-- Settings & Graph Inspector -->
+    <string name="settings_title">الإعدادات</string>
+    <string name="settings_theme">المظهر</string>
+    <string name="theme_auto">تلقائي</string>
+    <string name="theme_light">نهاري</string>
+    <string name="theme_dark">ليلي</string>
+    <string name="settings_units">الوحدات</string>
+    <string name="units_auto">تلقائي</string>
+    <string name="units_metric">متري</string>
+    <string name="units_imperial">إمبراطوري</string>
+    <string name="settings_glass_blur_title">تمويه زجاجي حقيقي (تجريبي)</string>
+    <string name="settings_glass_blur_subtitle">تمويه الخريطة خلف اللوحات على أندرويد 12+ (معطل افتراضياً)</string>
+    <string name="settings_reduce_transparency_title">تقليل الشفافية</string>
+    <string name="settings_reduce_transparency_subtitle">استخدام لوحات معتمة بدلاً من الزجاج الشفاف</string>
+    <string name="settings_tts_title">تنبيهات صوتية بالعربية</string>
+    <string name="settings_tts_subtitle">نطق اختياري للمعالم القادمة (معطل افتراضياً)</string>
+    <string name="settings_developer_title">المطور</string>
+    <string name="settings_show_inspector">إظهار فاحص الشبكة</string>
+    <string name="inspector_show_graph_edges">إظهار حواف شبكة الطرق على الخريطة</string>
+    <string name="settings_mock_mode">وضع الموقع التجريبي</string>
+    <string name="settings_reset_overrides">إعادة ضبط تجاوزات التشخيص</string>
+    <string name="settings_inspector_title">فاحص الشبكة والموقع التجريبي</string>
+    <string name="settings_inspector_subtitle">اضغط الخريطة لتعيين الموقع والاتجاه وفحص وسوم OSM</string>
+    <string name="settings_clear_cache">مسح بيانات الطرق المخزنة</string>
+    <string name="settings_cache_count_format">%1$d خلية طريق مخزنة</string>
+    <string name="inspector_copy_report">نسخ</string>
+    <string name="inspector_copied">تم النسخ</string>
+    <string name="inspector_report_title">التقرير</string>
+    <string name="inspector_report_clipboard_note">Clipboard may not reach your device when running in a cloud emulator: take a screenshot</string>
+    <string name="inspector_mode_live">GPS مباشر</string>
+    <string name="inspector_mode_mock">تجريبي</string>
+    <string name="inspector_snap_road">محاذاة</string>
+    <string name="inspector_debug_override">تجاوز تشخيصي</string>
+    <string name="inspector_controls_tab">التحكم</string>
+    <string name="inspector_details_tab">التفاصيل</string>
+    <string name="inspector_test_overpass">اختبار Overpass</string>
+    <string name="inspector_testing_overpass">جارٍ الاختبار…</string>
+    <string name="inspector_reload_road_data">إعادة تحميل بيانات الطرق</string>
+    <string name="inspector_block_overpass">حجب Overpass</string>
+    <string name="inspector_block_tiles">حجب البلاطات</string>
+    <string name="inspector_slow_network">شبكة بطيئة (3–8 ث)</string>
+    <string name="inspector_force_overpass_error">فرض خطأ Overpass</string>
+    <string name="inspector_error_none">إيقاف</string>
+    <string name="inspector_clear_caches">مسح التخزين المؤقت</string>
+    <string name="settings_offline_mode">غير متصل (حجب الشبكة)</string>
+    <string name="snackbar_inspector_on">الفاحص مفعل</string>
+    <string name="snackbar_inspector_off">الفاحص متوقف</string>
+    <string name="inspector_along_road">على الطريق</string>
+    <string name="inspector_sim_drive">محاكاة القيادة</string>
+    <string name="inspector_sim_play">تشغيل</string>
+    <string name="inspector_sim_pause">إيقاف</string>
+    <string name="inspector_sim_speed_format">%1$d كم/س</string>
+    <string name="inspector_sim_speed_mph_format">%1$d ميل/س</string>
+    <string name="inspector_sim_dead_end">توقف عند طريق مسدود</string>
+    <string name="inspector_accuracy_format">الدقة ±%1$d م</string>
+    <string name="inspector_jitter">تذبذب</string>
+    <string name="inspector_save_spot">حفظ نقطة</string>
+    <string name="inspector_save_spot_title">حفظ نقطة اختبار</string>
+    <string name="inspector_spot_name_hint">اسم النقطة</string>
+    <string name="inspector_spots_title">نقاط الاختبار المحفوظة</string>
+    <string name="inspector_spots_empty">لا توجد نقاط اختبار محفوظة</string>
+    <string name="inspector_restore_default_spots">استعادة النقاط الافتراضية</string>
+    <string name="mock_no_position_prompt">اضغط على الخريطة أو اختر نقطة اختبار</string>
+    <string name="inspector_pipeline_summary_prefix">ملخص المسار:</string>
+    <string name="inspector_spot_save_short">حفظ</string>
+    <string name="inspector_live_jumps_title">قفزات GPS المباشر المتجاهلة (&gt;500م في &lt;2ث)</string>
+    <string name="inspector_orientation_title">الاتجاه والنافذة</string>
+    <string name="inspector_orientation_warning">تم طلب الوضع الأفقي، لكن النظام/المحاكي أبقى الاتجاه عمودياً</string>
+    <string name="settings_dev_orientation">الاتجاه</string>
+    <string name="orientation_auto">تلقائي</string>
+    <string name="orientation_landscape">أفقي</string>
+    <string name="orientation_portrait">عمودي</string>
+    <string name="sim_branch_selected">هدف الانعطاف</string>
+    <string name="action_save">حفظ</string>
+    <string name="action_cancel">إلغاء</string>
+    <string name="settings_layout_title">التخطيط</string>
+    <string name="settings_landscape_panel_side">موضع اللوحة في الوضع الأفقي</string>
+    <string name="side_left">يسار</string>
+    <string name="side_right">يمين</string>
+    <string name="panel_expand">توسيع اللوحة</string>
+    <string name="panel_collapse">طي اللوحة</string>
+    <string name="no_map_data_here">لا توجد بيانات طرق هنا</string>
+    <string name="zoom_in_tap_road">قرّب الخريطة واضغط على طريق</string>
+    <string name="inspector_ping_overpass">فحص Overpass</string>
+    <string name="status_updating">جارٍ التحديث</string>
+
+    <!-- Phase 5 & 6: Horizon, Timeline, Landmarks & Find on my road -->
+    <string name="settings_horizon">مدى الطريق أمامك</string>
+    <string name="settings_show_minor_junctions">إظهار التفرعات الفرعية</string>
+    <string name="settings_show_minor_junctions_sub">تضمين الشوارع الجانبية السكنية وغير المسماة على الطرق الرئيسية</string>
+    <string name="settings_landmarks_ahead">المعالم البارزة أمامك</string>
+    <string name="settings_landmarks_ahead_sub">عرض المحطات والمستشفيات والمعالم البارزة على طول الطريق</string>
+    <string name="timeline_title">خط سير الطريق أمامك</string>
+    <string name="timeline_loaded_format">تم تحميل %1$s</string>
+    <string name="timeline_hidden_minor_format">مخفي: %1$d فرعي</string>
+    <string name="action_overview">نظرة شاملة</string>
+    <string name="action_exit_overview">إنهاء النظرة</string>
+    <string name="landmarks_ahead_format">معالم بارزة (%1$d)</string>
+    <string name="search_scope_on_road">على طريقي</string>
+    <string name="search_scope_everywhere">في كل مكان</string>
+    <string name="search_moving_caution">أثناء الحركة — نظرة سريعة فقط مع الانتباه للطريق</string>
+    <string name="search_recent_title">الأخيرة</string>
+    <string name="relation_ahead">أمامك</string>
+    <string name="relation_behind_passed_format">تجاوزته منذ %1$s</string>
+    <string name="relation_parallel">موازٍ</string>
+    <string name="entry_open">مفتوح</string>
+    <string name="entry_indirect">غير مباشر</string>
+    <string name="entry_blocked">مغلق</string>
+    <string name="entry_unverified">غير متحقق</string>
+    <string name="found_match_badge">مُطابق</string>
+    <string name="found_target_offscreen_format">تم العثور · %1$s</string>
+</resources>
