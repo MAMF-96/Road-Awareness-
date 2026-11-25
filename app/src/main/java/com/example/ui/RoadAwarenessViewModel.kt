@@ -53,6 +53,7 @@ import com.example.data.model.SearchScope
 import com.example.data.model.TestSpot
 import com.example.data.model.ThemePreference
 import com.example.data.model.TileRoadHint
+import com.example.data.model.TracedPathSegment
 import com.example.data.model.TravelMode
 import com.example.data.model.UnitPreference
 import com.example.data.model.UnitSystem
@@ -126,6 +127,9 @@ data class RoadHudUiState(
   val loadedCorridorMeters: Double = 0.0,
   val hiddenMinorCount: Int = 0,
   val landmarksAhead: List<LandmarkAheadItem> = emptyList(),
+  val tracedPathSegments: List<TracedPathSegment> = emptyList(),
+  val horizonStoppedAtUnloadedBorder: Boolean = false,
+  val nearbyUnreachableLinks: List<String> = emptyList(),
   val isOverviewMode: Boolean = false,
   val overviewSignal: Int = 0,
   val featureCensus: List<FeatureCensusEntry> = emptyList(),
@@ -2533,6 +2537,9 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
             loadedCorridorMeters = detailed?.loadedCorridorMeters ?: 0.0,
             hiddenMinorCount = detailed?.hiddenMinorCount ?: 0,
             landmarksAhead = detailed?.landmarksAhead ?: emptyList(),
+            tracedPathSegments = detailed?.tracedPathSegments ?: emptyList(),
+            horizonStoppedAtUnloadedBorder = detailed?.horizonStoppedAtUnloadedBorder ?: false,
+            nearbyUnreachableLinks = detailed?.nearbyUnreachableLinks ?: emptyList(),
             activeFoundRoad = if (state.activeFoundRoad != null) refreshedFound else null,
             selectedFeatureIndex = keptIndex,
             lastConfirmedRoadName = confirmedName,
@@ -2710,7 +2717,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
         stageId = "d",
         label = "Graph build",
         ok = graphOk || (isEmptyArea && graphIntegrityOk),
-        summary = "v${snap.version} ways=${g.ways.size} tile=${snap.waysPerTileMin}/$avgPerTileStr/${snap.waysPerTileMax} col=${snap.idCollisions} dang=${snap.danglingNodeRefs} 150m:${edges150}e 500m:${nodes500}n/${edges500}e 1.5km:${edges1500}e bbox=$tileBoundsStr $nearestStr",
+        summary = "v${snap.version} ways=${g.ways.size} tile=${snap.waysPerTileMin}/$avgPerTileStr/${snap.waysPerTileMax} col=${snap.idCollisions} dang=${snap.danglingNodeRefs} border=${snap.borderStitchStats.totalBorderEndpoints}/${snap.borderStitchStats.connectedBorderEndpoints}/${snap.borderStitchStats.unconnectedBorderEndpoints} 150m:${edges150}e 500m:${nodes500}n/${edges500}e 1.5km:${edges1500}e bbox=$tileBoundsStr $nearestStr",
         reason = when {
           !graphIntegrityOk -> "col=${snap.idCollisions} dang=${snap.danglingNodeRefs}"
           isEmptyArea -> "empty area"
@@ -2836,7 +2843,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
     val rollingSummary =
       "mem=${snap.memoryTileCount}/${AppConfig.MAX_MEMORY_TILES} hit=${snap.memoryHits}/miss=${snap.memoryMisses} ev=${snap.evictions} trail=${trailingBreadcrumbs.size}"
     val horizonSummary =
-      "horizon=${state.lookaheadMeters.toInt()}m loaded=${state.loadedCorridorMeters.toInt()}m timeline=${state.timelineEntries.size} lm=${state.landmarksAhead.size} hiddenMinor=${state.hiddenMinorCount}"
+      "horizon=${state.lookaheadMeters.toInt()}m loaded=${state.loadedCorridorMeters.toInt()}m timeline=${state.timelineEntries.size} lm=${state.landmarksAhead.size} hiddenMinor=${state.hiddenMinorCount}${if (state.horizonStoppedAtUnloadedBorder) " (paused@tileBorder)" else ""}"
 
     _uiState.update {
       it.copy(
@@ -2857,6 +2864,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
             horizonStatsSummary = horizonSummary,
             idCollisions = snap.idCollisions,
             danglingNodeRefs = snap.danglingNodeRefs,
+            borderStitchStats = snap.borderStitchStats,
           ),
       )
     }
@@ -2895,6 +2903,8 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
         FeatureType.CUL_DE_SAC -> "نهاية دائرية"
         FeatureType.SERVICE_ROAD -> "طريق خدمة"
         FeatureType.SHARP_CURVE -> "منعطف حاد"
+        FeatureType.HAIRPIN -> "منعطف دبوسي حاد"
+        FeatureType.WINDING_ROAD -> "طريق متعرج"
         FeatureType.FOOTPATH -> "ممر مشاة"
         FeatureType.CROSSWALK -> "معبر مشاة"
         FeatureType.FOOTBRIDGE -> "جسر مشاة"

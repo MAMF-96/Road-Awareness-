@@ -350,9 +350,9 @@ class RoadClassificationPureTest {
     assertEquals(0.90, clover!!.confidence, 0.001)
     assertEquals(FeatureType.CLOVERLEAF, clover.effectiveDisplayType())
     assertEquals(4, clover.branches.size)
-    // Raw OFF_RAMP / BRIDGE inside the interchange are hidden from main list, stored in hiddenSubFeatures
+    // Bridges and junctions inside the interchange are never hidden (Rule 13); merged ramps remain in hiddenSubFeatures
     assertTrue(clover.hiddenSubFeatures.isNotEmpty())
-    assertFalse(cFeatures.any { it.type == FeatureType.BRIDGE && it.anchorNodeId == m2.id })
+    assertTrue(cFeatures.any { it.type == FeatureType.BRIDGE && it.anchorNodeId == m2.id })
 
     // 2. DIAMOND (4 straight ramps <60 deg meeting crossing road at-grade on both sides)
     val dNodes = mutableListOf(m1, m2, m3, m4)

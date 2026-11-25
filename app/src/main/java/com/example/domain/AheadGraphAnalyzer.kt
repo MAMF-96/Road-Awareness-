@@ -21,6 +21,7 @@ import com.example.data.model.RoadBranch
 import com.example.data.model.RoadCandidate
 import com.example.data.model.RoadFeature
 import com.example.data.model.RoadGraph
+import com.example.data.model.TracedPathSegment
 import com.example.data.model.TravelMode
 import kotlin.math.abs
 import kotlin.math.cos
@@ -147,6 +148,7 @@ object AheadGraphAnalyzer {
     val way: OsmWay,
     val idx1: Int,
     val forward: Boolean,
+    val forkReason: String = "",
   )
 
   private data class ClassificationOutcome(
@@ -219,6 +221,8 @@ object AheadGraphAnalyzer {
     var prevIdx = matched.segmentIndex
     var accumulatedDist = 0.0
     var stepGuard = 0
+    var currentForkReason = "matched_start"
+    var horizonStoppedAtUnloadedBorder = false
 
     // If the user is already matched onto a highway=construction or access=no way, surface ROAD_WORKS immediately
     if (isRoadWorksWay(currentWay)) {
@@ -307,6 +311,7 @@ object AheadGraphAnalyzer {
               way = currentWay,
               idx1 = prevIdx,
               forward = forward,
+              forkReason = currentForkReason,
             )
         }
         if (accumulatedDist > traceLimit) break
@@ -363,7 +368,7 @@ object AheadGraphAnalyzer {
           }
         }
 
-        // 2) Sharp curve at intermediate vertices (excluding junction nodes with >1 relevant ways)
+        // 2) Connected ways at node (path-based curves are detected after full trace)
         val connectedWaysAtNode =
           if (nodeId != null) {
             (graph.nodeToWays[nodeId] ?: emptyList())
@@ -372,40 +377,6 @@ object AheadGraphAnalyzer {
           } else {
             emptyList()
           }
-
-        if (connectedWaysAtNode.size <= 1 && posInList > 0 && posInList < indices.lastIndex) {
-          val pPrev = currentWay.points[indices[posInList - 1]]
-          val pCurr = pt
-          val pNext = currentWay.points[indices[posInList + 1]]
-          val (turnDeg, radiusM) = GeoMath.turningAngleAndRadius(pPrev, pCurr, pNext)
-          if (turnDeg >= AppConfig.SHARP_CURVE_MIN_ANGLE_DEG && radiusM <= AppConfig.SHARP_CURVE_MAX_RADIUS_M) {
-            val nearExistingCurve =
-              features.any { it.type == FeatureType.SHARP_CURVE && abs(it.distanceMeters - accumulatedDist) < 40.0 }
-            if (!nearExistingCurve) {
-              val incoming = sliceWorldPath(currentWay, idx, forward, takeBack = true, maxMeters = 55.0)
-              val outgoing = sliceWorldPath(currentWay, idx, forward, takeBack = false, maxMeters = 55.0)
-              features +=
-                RoadFeature(
-                  index = features.size + 1,
-                  type = FeatureType.SHARP_CURVE,
-                  distanceMeters = accumulatedDist,
-                  anchor = pCurr,
-                  anchorNodeId = nodeId,
-                  incomingLocalPoints = incoming.map { GeoMath.projectToHeadingFrame(pCurr, lastIncomingBearing, it) },
-                  incomingWorldPoints = incoming,
-                  outgoingMainLocalPoints = outgoing.map { GeoMath.projectToHeadingFrame(pCurr, lastIncomingBearing, it) },
-                  outgoingMainWorldPoints = outgoing,
-                  branches = emptyList(),
-                  osmTags = currentWay.tags,
-                  curveAngleDeg = turnDeg,
-                  curveRadiusMeters = radiusM,
-                  source = currentWay.source,
-                  ruleId = "geom_sharp_curve",
-                  confidence = 0.90,
-                )
-            }
-          }
-        }
 
         // 3) Junction / Branching / Endpoint detection
         if (nodeId != null && nodeId !in visitedJunctionNodes) {
@@ -457,7 +428,12 @@ object AheadGraphAnalyzer {
         prevIdx = idx
       }
 
-      if (accumulatedDist >= traceLimit || lastTraversedNodeId == null) break
+      if (accumulatedDist >= traceLimit || lastTraversedNodeId == null) {
+        if (accumulatedDist < traceLimit && isNearUnloadedOrPendingTileBorder(prevPoint, graph, currentWay.id)) {
+          horizonStoppedAtUnloadedBorder = true
+        }
+        break
+      }
 
       // Continue along straightest open continuation way from lastTraversedNodeId
       val nextHop =
@@ -468,10 +444,18 @@ object AheadGraphAnalyzer {
           incomingBearing = lastIncomingBearing,
           visitedWayIds = visitedWayIds,
           mode = mode,
-        ) ?: break
+        )
+      if (nextHop == null) {
+        val stopPt = graph.nodes[lastTraversedNodeId]?.point ?: prevPoint
+        if (isNearUnloadedOrPendingTileBorder(stopPt, graph, currentWay.id)) {
+          horizonStoppedAtUnloadedBorder = true
+        }
+        break
+      }
 
       currentWay = nextHop.way
       forward = nextHop.forward
+      currentForkReason = nextHop.reason
       startNodeIndex = if (forward) nextHop.nodeIndex + 1 else nextHop.nodeIndex - 1
       prevNodeId = lastTraversedNodeId
       prevIdx = nextHop.nodeIndex
@@ -521,6 +505,15 @@ object AheadGraphAnalyzer {
       }
     }
 
+    // 3b) Path-based curve & S-bend detector (5m resample, 40m sliding window)
+    val curveFeatures =
+      detectPathCurves(
+        matched = matched,
+        tracedSegments = tracedSegments,
+        maxLookahead = maxLookahead,
+      )
+    features += curveFeatures
+
     // 4) Grade-separated Overpass / Underpass crossings (ways crossing user's path WITHOUT a shared node)
     detectGradeSeparatedCrossings(
       graph = graph,
@@ -531,26 +524,66 @@ object AheadGraphAnalyzer {
 
     // 5) Composite features strictly on the corridor ahead (Driving 800m, Walking 250m)
     val dividedRoadInfo = detectDividedRoadPartner(graph, matched, tracedSegments, mode)
+    val nearbyUnreachableLinks = mutableListOf<String>()
     val groupedFeatures =
       applyCompositeGrouping(
         graph = graph,
         matched = matched,
         tracedSegments = tracedSegments.filter { it.cumDistAtP1 <= compositeCorridorMeters },
+        fullTracedSegments = tracedSegments,
         rawFeatures = features,
         dividedRoad = dividedRoadInfo,
         compositeCorridorMeters = compositeCorridorMeters,
         maxStandaloneLookahead = maxLookahead,
         mode = mode,
+        unreachableLinkLogsOut = nearbyUnreachableLinks,
       )
 
-    val sortedGrouped = groupedFeatures.sortedBy { it.distanceMeters }
+    val corridorWorldPts = ArrayList<GeoPoint>(tracedSegments.size + 1)
+    corridorWorldPts += matched.snappedPoint
+    for (seg in tracedSegments) {
+      if (seg.cumDistAtP1 > maxLookahead) break
+      if (GeoMath.haversineMeters(corridorWorldPts.last(), seg.p2) > 0.8) {
+        corridorWorldPts += seg.p2
+      }
+    }
+
+    // Hard boundary check (#15): distance <= maxLookahead and anchor within 5m of main corridor path
+    val boundedGrouped =
+      groupedFeatures.mapNotNull { feat ->
+        if (feat.distanceMeters > maxLookahead + 0.01) return@mapNotNull null
+        if (corridorWorldPts.size >= 2) {
+          val snap = GeoMath.snapToPolyline(feat.anchor, corridorWorldPts)
+          if (snap.distanceMeters > 5.0) return@mapNotNull null
+        } else if (GeoMath.haversineMeters(feat.anchor, matched.snappedPoint) > 5.0) {
+          return@mapNotNull null
+        }
+        if (feat.branches.isEmpty()) {
+          feat
+        } else {
+          val keptBranches =
+            feat.branches.filter { br ->
+              if (br.distanceMeters > maxLookahead + 0.01) return@filter false
+              val dep = br.departurePoint ?: br.worldPoints.firstOrNull() ?: feat.anchor
+              if (corridorWorldPts.size >= 2) {
+                GeoMath.snapToPolyline(dep, corridorWorldPts).distanceMeters <= 5.0
+              } else {
+                GeoMath.haversineMeters(dep, matched.snappedPoint) <= 5.0
+              }
+            }
+          if (keptBranches.isEmpty() && feat.isInterchangeGroup()) return@mapNotNull null
+          feat.copy(branches = keptBranches)
+        }
+      }
+
+    val sortedGrouped = boundedGrouped.sortedBy { it.distanceMeters }
     var hiddenMinorCount = 0
     val filteredFeatures =
       if (showMinorJunctions) {
         sortedGrouped
       } else {
         sortedGrouped.filter { feat ->
-          val minor = isMinorJunctionOnArterial(matched, feat)
+          val minor = isMinorJunctionOnArterial(matched, feat, mode)
           if (minor) hiddenMinorCount++
           !minor
         }
@@ -570,14 +603,6 @@ object AheadGraphAnalyzer {
           feat.copy(index = num, branches = relettered)
         }
 
-    val corridorWorldPts = ArrayList<GeoPoint>(tracedSegments.size + 1)
-    corridorWorldPts += matched.snappedPoint
-    for (seg in tracedSegments) {
-      if (seg.cumDistAtP1 > maxLookahead) break
-      if (GeoMath.haversineMeters(corridorWorldPts.last(), seg.p2) > 0.8) {
-        corridorWorldPts += seg.p2
-      }
-    }
     val loadedCorridorMeters =
       tracedSegments.lastOrNull()?.let { (it.cumDistAtP1 + it.segLenMeters).coerceAtMost(maxLookahead) } ?: 0.0
 
@@ -640,6 +665,8 @@ object AheadGraphAnalyzer {
 
     val fullTimeline = (featureTimeline + landmarkTimeline).sortedBy { it.distanceMeters }
 
+    val tracedPathLog = buildTracedPathSegmentLogs(tracedSegments)
+
     val result =
       AheadAnalysisResult(
         features = indexed,
@@ -649,6 +676,9 @@ object AheadGraphAnalyzer {
         loadedCorridorMeters = loadedCorridorMeters,
         hiddenMinorCount = hiddenMinorCount,
         landmarksAhead = landmarksAhead,
+        tracedPathSegments = tracedPathLog,
+        horizonStoppedAtUnloadedBorder = horizonStoppedAtUnloadedBorder,
+        nearbyUnreachableLinks = nearbyUnreachableLinks.distinct(),
       )
     synchronized(compositeCacheLock) {
       compositeAnalysisCache[cacheKey] = result
@@ -656,7 +686,57 @@ object AheadGraphAnalyzer {
     return result
   }
 
-  private fun isMinorJunctionOnArterial(matched: RoadCandidate, feature: RoadFeature): Boolean {
+  private fun buildTracedPathSegmentLogs(tracedSegments: List<TracedSegment>): List<TracedPathSegment> {
+    if (tracedSegments.isEmpty()) return emptyList()
+    val out = mutableListOf<TracedPathSegment>()
+    var curWay = tracedSegments.first().way
+    var startDist = tracedSegments.first().cumDistAtP1
+    var endDist = startDist + tracedSegments.first().segLenMeters
+    var reason = tracedSegments.first().forkReason
+    for (i in 1 until tracedSegments.size) {
+      val s = tracedSegments[i]
+      if (s.way.id == curWay.id) {
+        endDist = s.cumDistAtP1 + s.segLenMeters
+      } else {
+        out +=
+          TracedPathSegment(
+            wayId = curWay.id,
+            name = curWay.tags.name ?: curWay.tags.nameEn ?: curWay.tags.nameAr ?: curWay.tags.ref ?: "unnamed",
+            highway = curWay.tags.highway ?: "unknown",
+            oneway = curWay.tags.effectiveOneway() ?: "no",
+            startDistMeters = startDist,
+            endDistMeters = endDist,
+            forkReason = reason,
+          )
+        curWay = s.way
+        startDist = s.cumDistAtP1
+        endDist = s.cumDistAtP1 + s.segLenMeters
+        reason = s.forkReason
+      }
+    }
+    out +=
+      TracedPathSegment(
+        wayId = curWay.id,
+        name = curWay.tags.name ?: curWay.tags.nameEn ?: curWay.tags.nameAr ?: curWay.tags.ref ?: "unnamed",
+        highway = curWay.tags.highway ?: "unknown",
+        oneway = curWay.tags.effectiveOneway() ?: "no",
+        startDistMeters = startDist,
+        endDistMeters = endDist,
+        forkReason = reason,
+      )
+    return out
+  }
+
+  private fun isMinorJunctionOnArterial(
+    matched: RoadCandidate,
+    feature: RoadFeature,
+    mode: TravelMode,
+  ): Boolean {
+    if (feature.type == FeatureType.SHARP_CURVE && (feature.curveAngleDeg ?: 0.0) < 60.0) {
+      return true
+    }
+    val alwaysShowWithinM = if (mode == TravelMode.DRIVING) 600.0 else 250.0
+    if (feature.distanceMeters <= alwaysShowWithinM) return false
     if (highwayRank(matched.way.tags.highway) < 4) return false
     if (feature.type !in setOf(FeatureType.T_JUNCTION, FeatureType.Y_JUNCTION, FeatureType.SERVICE_ROAD)) return false
     val sideBranches =
@@ -666,6 +746,7 @@ object AheadGraphAnalyzer {
     if (sideBranches.isEmpty()) return false
     return sideBranches.all { br ->
       val hw = br.osmTags.highway?.lowercase()
+      if (hw in LINK_HIGHWAYS) return@all false
       val r = highwayRank(hw)
       val hasIdentity =
         BilingualName.fromOsmTags(br.osmTags).hasAny ||
@@ -900,6 +981,17 @@ object AheadGraphAnalyzer {
         }
       }
 
+      // Path-based curves & S-bends on this way
+      val wayCurves = detectWayCurvesForCensus(way)
+      for (wc in wayCurves) {
+        val anchor = wc.anchor
+        val d = GeoMath.haversineMeters(center, anchor)
+        if (d <= radiusMeters) {
+          val (jp, hdg) = computeJumpBefore(way, 0, true, anchor)
+          addHit(CensusHit(wc.type, d, anchor, jp, hdg, "${wc.type.name}_${way.id}_${(wc.distanceMeters / 20.0).toInt()}"))
+        }
+      }
+
       for (idx in way.points.indices) {
         val pt = way.points[idx]
         val d = GeoMath.haversineMeters(center, pt)
@@ -932,20 +1024,12 @@ object AheadGraphAnalyzer {
           }
         }
 
-        // Sharp curve
         val connected =
           if (nid != null) {
             graph.nodeToWays[nid].orEmpty().mapNotNull { graph.ways[it] }.filter { isWayCountedAtNode(it, way.id, mode) }
           } else {
             emptyList()
           }
-        if (connected.size <= 1 && idx in 1 until way.points.lastIndex) {
-          val (turnDeg, rad) = GeoMath.turningAngleAndRadius(way.points[idx - 1], pt, way.points[idx + 1])
-          if (turnDeg >= AppConfig.SHARP_CURVE_MIN_ANGLE_DEG && rad <= AppConfig.SHARP_CURVE_MAX_RADIUS_M) {
-            val (jp, hdg) = computeJumpBefore(way, idx, true, pt)
-            addHit(CensusHit(FeatureType.SHARP_CURVE, d, pt, jp, hdg, "SC_${way.id}_${idx / 2}"))
-          }
-        }
 
         // Junctions & Endpoints
         if (nid != null) {
@@ -1085,6 +1169,7 @@ object AheadGraphAnalyzer {
     val way: OsmWay,
     val nodeIndex: Int,
     val forward: Boolean,
+    val reason: String = "",
   )
 
   private fun isRoadWorksWay(way: OsmWay): Boolean {
@@ -1317,8 +1402,8 @@ object AheadGraphAnalyzer {
         )
       }
 
-      // 4. Never emit DEAD_END within 3m of a tile border unless neighbouring tile IS loaded
-      if (incomingWay.source == GraphDataSource.TILES && isNearUnloadedTileBorder(junctionPoint, graph)) {
+      // 4. Never emit DEAD_END within 6m of a tile border unless neighbouring tile IS loaded AND has no endpoint within 2m
+      if (isNearUnloadedOrPendingTileBorder(junctionPoint, graph, incomingWay.id)) {
         return null
       }
 
@@ -1345,7 +1430,21 @@ object AheadGraphAnalyzer {
     if (nonMainEdges.isEmpty() && edges.size == 1) {
       return null
     }
-    if (edges.size == 1 && abs(edges[0].bearingDelta) < 25.0) {
+
+    val hasUTurn =
+      edges.any { edge ->
+        !edge.isContinuationOfCurrentWay &&
+          edge.way.id != incomingWay.id &&
+          abs(edge.bearingDelta) >= 145.0 &&
+          (
+            edge.way.tags.highway?.lowercase() in LINK_HIGHWAYS ||
+              junctionNodeId in roundaboutInfo.culDeSacLoopNodes ||
+              isTerminalLoopUnder25m(edge.way.points) ||
+              isMedianOpeningTurnConnector(graph, junctionNodeId, edge.way, incomingWay, mode)
+          )
+      }
+
+    if (edges.size == 1 && !hasUTurn) {
       val nextWay = edges[0].way
       if (isRoadWorksWay(nextWay)) {
         val nextBranch =
@@ -1361,6 +1460,7 @@ object AheadGraphAnalyzer {
             worldPoints = edges[0].worldPoints,
             localPoints = edges[0].worldPoints.map { GeoMath.projectToHeadingFrame(junctionPoint, incomingBearing, it) },
             osmTags = nextWay.tags,
+            departurePoint = junctionPoint,
           )
         return RoadFeature(
           index = featureIndex,
@@ -1379,8 +1479,10 @@ object AheadGraphAnalyzer {
           confidence = 0.97,
         )
       }
-      if (nextWay.tags.highway == incomingWay.tags.highway) {
-        // Pure OSM way split (bridge/tunnel/speed limit change) -> let way-transition emit BRIDGE/TUNNEL cleanly
+      if (nextWay.tags.highway == incomingWay.tags.highway ||
+        (nextWay.tags.highway?.lowercase() != "service" && hasSameRefOrName(incomingWay.tags, nextWay.tags))
+      ) {
+        // Pure OSM way split (bridge/tunnel/speed limit/hairpin apex) -> do not emit fake junction or U-turn
         return null
       }
     }
@@ -1405,7 +1507,6 @@ object AheadGraphAnalyzer {
             it.way.tags.bridge != null &&
             it.way.tags.bridge != "no"
         }
-    val hasUTurn = edges.any { abs(it.bearingDelta) >= 145.0 }
 
     val straightEdge = edges.minByOrNull { abs(it.bearingDelta) }
     val hasStraight = straightEdge != null && abs(straightEdge.bearingDelta) <= 22.0
@@ -1456,6 +1557,7 @@ object AheadGraphAnalyzer {
           worldPoints = edge.worldPoints,
           localPoints = edge.worldPoints.map { GeoMath.projectToHeadingFrame(junctionPoint, incomingBearing, it) },
           osmTags = edge.way.tags,
+          departurePoint = junctionPoint,
         )
       }
 
@@ -1692,16 +1794,46 @@ object AheadGraphAnalyzer {
     }
   }
 
-  private fun isNearUnloadedTileBorder(pt: GeoPoint, graph: RoadGraph): Boolean {
+  private fun isMedianOpeningTurnConnector(
+    graph: RoadGraph,
+    junctionNodeId: Long,
+    edgeWay: OsmWay,
+    incomingWay: OsmWay,
+    mode: TravelMode,
+  ): Boolean {
+    if (edgeWay.points.size < 2 || edgeWay.nodeIds.size < 2) return false
+    if (GeoMath.polylineLengthMeters(edgeWay.points) > 85.0) return false
+    val incomingDir = incomingWay.tags.effectiveOneway()
+    for (nid in edgeWay.nodeIds) {
+      if (nid == junctionNodeId) continue
+      for (otherId in graph.nodeToWays[nid].orEmpty()) {
+        if (otherId == edgeWay.id || otherId == incomingWay.id) continue
+        val other = graph.ways[otherId] ?: continue
+        if (!isRelevantForMode(other, mode)) continue
+        val otherOw = other.tags.effectiveOneway()
+        if (incomingDir in setOf("yes", "-1") && otherOw in setOf("yes", "-1") &&
+          sameRoadIdentityForDivided(incomingWay.tags, other.tags)
+        ) {
+          return true
+        }
+      }
+    }
+    return false
+  }
+
+  private fun isNearUnloadedOrPendingTileBorder(
+    pt: GeoPoint,
+    graph: RoadGraph,
+    currentWayId: Long? = null,
+  ): Boolean {
     val loaded = graph.loadedTiles
     if (loaded.isEmpty()) return false
-    val loadedKeys = loaded.mapTo(HashSet()) { "${it.z}_${it.x}_${it.y}" }
-    val thresholdM = 3.2
+    val loadedByKey = loaded.associateBy { "${it.z}_${it.x}_${it.y}" }
+    val thresholdM = 6.0
 
     for (tile in loaded) {
-      // Check if pt is inside or within ~5m of this tile
-      val latPad = 0.00005
-      val lonPad = 0.00005
+      val latPad = 0.0001
+      val lonPad = 0.0001
       if (pt.lat < tile.south - latPad || pt.lat > tile.north + latPad ||
         pt.lon < tile.west - lonPad || pt.lon > tile.east + lonPad
       ) {
@@ -1713,10 +1845,33 @@ object AheadGraphAnalyzer {
       val dNorth = GeoMath.haversineMeters(pt, GeoPoint(tile.north, pt.lon))
       val dSouth = GeoMath.haversineMeters(pt, GeoPoint(tile.south, pt.lon))
 
-      if (dWest <= thresholdM && "${tile.z}_${tile.x - 1}_${tile.y}" !in loadedKeys) return true
-      if (dEast <= thresholdM && "${tile.z}_${tile.x + 1}_${tile.y}" !in loadedKeys) return true
-      if (dNorth <= thresholdM && "${tile.z}_${tile.x}_${tile.y - 1}" !in loadedKeys) return true
-      if (dSouth <= thresholdM && "${tile.z}_${tile.x}_${tile.y + 1}" !in loadedKeys) return true
+      val bordersToCheck = ArrayList<String>(2)
+      if (dWest <= thresholdM) bordersToCheck += "${tile.z}_${tile.x - 1}_${tile.y}"
+      if (dEast <= thresholdM) bordersToCheck += "${tile.z}_${tile.x + 1}_${tile.y}"
+      if (dNorth <= thresholdM) bordersToCheck += "${tile.z}_${tile.x}_${tile.y - 1}"
+      if (dSouth <= thresholdM) bordersToCheck += "${tile.z}_${tile.x}_${tile.y + 1}"
+
+      for (neighborKey in bordersToCheck) {
+        val neighborTile = loadedByKey[neighborKey]
+        if (neighborTile == null) {
+          // Neighbour tile is NOT loaded yet -> treat as unloaded border
+          return true
+        }
+        // Neighbour tile IS loaded: only allow dead end when it has NO endpoint within 2 m
+        val hasEndpointInNeighbor =
+          graph.ways.values.any { w ->
+            if (w.id == currentWayId || w.points.isEmpty()) return@any false
+            val endPts = listOf(w.points.first(), w.points.last())
+            endPts.any { ep ->
+              ep.lat in (neighborTile.south - 0.00003)..(neighborTile.north + 0.00003) &&
+                ep.lon in (neighborTile.west - 0.00003)..(neighborTile.east + 0.00003) &&
+                GeoMath.haversineMeters(pt, ep) <= 2.0
+            }
+          }
+        if (hasEndpointInNeighbor) {
+          return true
+        }
+      }
     }
     return false
   }
@@ -1990,6 +2145,15 @@ object AheadGraphAnalyzer {
     return Triple(t, u, interPt)
   }
 
+  private fun hasSameRefOrName(tagsA: OsmTags, tagsB: OsmTags): Boolean {
+    val refA = tagsA.ref?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+    val refB = tagsB.ref?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+    if (refA != null && refB != null && refA == refB) return true
+    val namesA = normalizedRoadNames(tagsA)
+    val namesB = normalizedRoadNames(tagsB)
+    return namesA.isNotEmpty() && namesB.isNotEmpty() && namesA.intersect(namesB).isNotEmpty()
+  }
+
   private fun findContinuationWay(
     graph: RoadGraph,
     fromNodeId: Long,
@@ -1998,8 +2162,12 @@ object AheadGraphAnalyzer {
     visitedWayIds: Set<Long>,
     mode: TravelMode,
   ): NextHop? {
-    val candidates = mutableListOf<Pair<NextHop, Double>>()
+    data class ScoredHop(val hop: NextHop, val score: Double, val angleDiff: Double, val reasonTag: String)
+    val candidates = mutableListOf<ScoredHop>()
     val wayIds = graph.nodeToWays[fromNodeId].orEmpty()
+    val curRank = highwayRank(currentWay.tags.highway)
+    val curIsService = currentWay.tags.highway?.lowercase() == "service"
+
     for (wId in wayIds) {
       if (wId == currentWay.id || wId in visitedWayIds) continue
       val way = graph.ways[wId] ?: continue
@@ -2007,28 +2175,61 @@ object AheadGraphAnalyzer {
       val idx = way.nodeIds.indexOf(fromNodeId)
       if (idx < 0) continue
 
-      if (idx + 1 < way.points.size) {
-        val status = evaluateBranchStatus(way, outgoingForward = true, mode = mode)
-        if (status != BranchStatus.BLOCKED || isRoadWorksWay(way)) {
-          val brng = GeoMath.bearingDeg(way.points[idx], way.points[idx + 1])
-          val angleDiff = GeoMath.absAngleDiff(incomingBearing, brng)
-          if (angleDiff < 85.0) {
-            candidates += NextHop(way, idx, true) to angleDiff
+      val hw = way.tags.highway?.lowercase()
+      val sameRefOrName = hasSameRefOrName(currentWay.tags, way.tags)
+      val sameClass = hw == currentWay.tags.highway?.lowercase()
+
+      // Guard: never jump onto a parallel carriageway or frontage road unless it shares same ref/name
+      if (!sameRefOrName) {
+        if (!curIsService && curRank >= 3 && hw == "service") continue
+        if (currentWay.points.size >= 2 && way.points.size >= 2) {
+          val overlap = measureParallelOverlap(currentWay.points, way.points, maxLateralMeters = 50.0)
+          if (overlap != null && overlap.lateralMeters in 3.0..50.0 &&
+            overlap.undirectedBearingDiffDeg < 20.0 && overlap.overlapMeters > 20.0
+          ) {
+            continue
           }
         }
       }
-      if (idx - 1 >= 0) {
-        val status = evaluateBranchStatus(way, outgoingForward = false, mode = mode)
-        if (status != BranchStatus.BLOCKED || isRoadWorksWay(way)) {
-          val brng = GeoMath.bearingDeg(way.points[idx], way.points[idx - 1])
-          val angleDiff = GeoMath.absAngleDiff(incomingBearing, brng)
-          if (angleDiff < 85.0) {
-            candidates += NextHop(way, idx, false) to angleDiff
-          }
+
+      fun evalDir(outForward: Boolean, nextIdx: Int) {
+        val status = evaluateBranchStatus(way, outgoingForward = outForward, mode = mode)
+        if (status == BranchStatus.BLOCKED && !isRoadWorksWay(way)) return
+        val brng = GeoMath.bearingDeg(way.points[idx], way.points[nextIdx])
+        val angleDiff = GeoMath.absAngleDiff(incomingBearing, brng)
+        if (angleDiff >= 85.0) return
+
+        var penalty = angleDiff
+        val reasons = mutableListOf<String>()
+        if (sameRefOrName) {
+          penalty -= 32.0
+          reasons += "same_id"
         }
+        if (sameClass) {
+          penalty -= 14.0
+          reasons += "same_class"
+        }
+        if (hw in LINK_HIGHWAYS && currentWay.tags.highway?.lowercase() !in LINK_HIGHWAYS) {
+          penalty += 22.0
+          reasons += "link_penalty"
+        }
+        if (reasons.isEmpty()) reasons += "straightest"
+        val label = "${reasons.joinToString("+")} d=${angleDiff.toInt()}°"
+        candidates += ScoredHop(NextHop(way, idx, outForward, label), penalty, angleDiff, label)
       }
+
+      if (idx + 1 < way.points.size) evalDir(outForward = true, nextIdx = idx + 1)
+      if (idx - 1 >= 0) evalDir(outForward = false, nextIdx = idx - 1)
     }
-    return candidates.minByOrNull { it.second }?.first
+
+    val best = candidates.minByOrNull { it.score } ?: return null
+    val reason =
+      if (candidates.size > 1) {
+        "${best.reasonTag} (beat ${candidates.size - 1} fork)"
+      } else {
+        best.reasonTag
+      }
+    return best.hop.copy(reason = reason)
   }
 
   private fun sliceWorldPath(
@@ -2154,9 +2355,15 @@ object AheadGraphAnalyzer {
       .filter { it.isNotEmpty() }
       .toSet()
 
+  private val DIRECTIONAL_CARRIAGEWAY_SUFFIX_REGEX =
+    Regex("(?:\\s+|\\s*[-/()]\\s*)(nb|sb|eb|wb|northbound|southbound|eastbound|westbound|north|south|east|west)\\)?$")
+
+  private fun stripDirectionalCarriagewaySuffix(name: String): String =
+    name.trim().lowercase().replace(DIRECTIONAL_CARRIAGEWAY_SUFFIX_REGEX, "").trim()
+
   private fun sameRoadIdentityForDivided(tagsA: OsmTags, tagsB: OsmTags): Boolean {
-    val namesA = normalizedRoadNames(tagsA)
-    val namesB = normalizedRoadNames(tagsB)
+    val namesA = normalizedRoadNames(tagsA).map { stripDirectionalCarriagewaySuffix(it) }.filter { it.isNotEmpty() }.toSet()
+    val namesB = normalizedRoadNames(tagsB).map { stripDirectionalCarriagewaySuffix(it) }.filter { it.isNotEmpty() }.toSet()
     val refA = tagsA.ref?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
     val refB = tagsB.ref?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
     val hasAnyIdA = namesA.isNotEmpty() || refA != null
@@ -2246,14 +2453,20 @@ object AheadGraphAnalyzer {
       val undirDiff = min(diffSame, diffOpp)
 
       if (snap.distanceMeters <= maxLateralMeters * 1.4) {
-        if (arcPos < minArc) minArc = arcPos
-        if (arcPos > maxArc) maxArc = arcPos
-        lateralSum += snap.distanceMeters
         val local = GeoMath.projectToHeadingFrame(snap.snappedPoint, refB, pt)
-        signedSum += local.xMeters
-        undirDiffSum += undirDiff
-        oppDiffSum += diffOpp
-        validCount++
+        val clampedAtStart = snap.segmentIndex == 0 && distFromA < 0.05 && local.yMeters < -1.0
+        val clampedAtEnd = snap.segmentIndex == refPoints.lastIndex - 1 &&
+          GeoMath.haversineMeters(snap.snappedPoint, refPoints.last()) < 0.05 &&
+          local.yMeters > 1.0
+        if (!clampedAtStart && !clampedAtEnd) {
+          if (arcPos < minArc) minArc = arcPos
+          if (arcPos > maxArc) maxArc = arcPos
+          lateralSum += snap.distanceMeters
+          signedSum += local.xMeters
+          undirDiffSum += undirDiff
+          oppDiffSum += diffOpp
+          validCount++
+        }
       }
     }
 
@@ -2271,15 +2484,24 @@ object AheadGraphAnalyzer {
       val undirDiff = min(diffSame, diffOpp)
 
       if (snap.distanceMeters <= maxLateralMeters * 1.4) {
-        val arcPos = refArc[j]
-        if (arcPos < minArc) minArc = arcPos
-        if (arcPos > maxArc) maxArc = arcPos
-        lateralSum += snap.distanceMeters
-        val local = GeoMath.projectToHeadingFrame(rp, refB, snap.snappedPoint)
-        signedSum += local.xMeters
-        undirDiffSum += undirDiff
-        oppDiffSum += diffOpp
-        validCount++
+        val localOnCand = GeoMath.projectToHeadingFrame(snap.snappedPoint, candB, rp)
+        val clampedAtStart = candSegIdx == 0 &&
+          GeoMath.haversineMeters(snap.snappedPoint, candPoints.first()) < 0.05 &&
+          localOnCand.yMeters < -1.0
+        val clampedAtEnd = candSegIdx == candPoints.lastIndex - 1 &&
+          GeoMath.haversineMeters(snap.snappedPoint, candPoints.last()) < 0.05 &&
+          localOnCand.yMeters > 1.0
+        if (!clampedAtStart && !clampedAtEnd) {
+          val arcPos = refArc[j]
+          if (arcPos < minArc) minArc = arcPos
+          if (arcPos > maxArc) maxArc = arcPos
+          lateralSum += snap.distanceMeters
+          val local = GeoMath.projectToHeadingFrame(rp, refB, snap.snappedPoint)
+          signedSum += local.xMeters
+          undirDiffSum += undirDiff
+          oppDiffSum += diffOpp
+          validCount++
+        }
       }
     }
 
@@ -2308,10 +2530,12 @@ object AheadGraphAnalyzer {
     // Group opposite-oneway ways sharing same identity to handle split ways cleanly
     val candidatePartners =
       graph.ways.values.filter { w ->
+        val hw = w.tags.highway?.lowercase()
         w.id != userWay.id &&
           w.points.size >= 2 &&
           isRelevantForMode(w, mode) &&
-          w.tags.highway?.lowercase() !in LINK_HIGHWAYS &&
+          hw !in LINK_HIGHWAYS &&
+          hw != "service" &&
           sameRoadIdentityForDivided(userWay.tags, w.tags) &&
           w.tags.effectiveOneway() in setOf("yes", "-1")
       }
@@ -2383,11 +2607,13 @@ object AheadGraphAnalyzer {
     graph: RoadGraph,
     matched: RoadCandidate,
     tracedSegments: List<TracedSegment>,
+    fullTracedSegments: List<TracedSegment>,
     rawFeatures: List<RoadFeature>,
     dividedRoad: DividedRoadInfo?,
     compositeCorridorMeters: Double,
     maxStandaloneLookahead: Double,
     mode: TravelMode,
+    unreachableLinkLogsOut: MutableList<String>,
   ): List<RoadFeature> {
     val working = rawFeatures.toMutableList()
     val corridorTimeline = buildCorridorTimeline(matched, tracedSegments)
@@ -2482,6 +2708,7 @@ object AheadGraphAnalyzer {
             worldPoints = connWorld,
             localPoints = connWorld.map { GeoMath.projectToHeadingFrame(userEntry.point, userEntry.bearingDeg, it) },
             osmTags = conn.tags,
+            departurePoint = userEntry.point,
           )
 
         addedComposites +=
@@ -2503,10 +2730,10 @@ object AheadGraphAnalyzer {
             dualCarriagewayOffsetMeters = dividedRoad.partnerSideOffsetMeters,
           )
 
-        // Replace overlapping U_TURN / T_JUNCTION / SERVICE_ROAD at this node
+        // Replace overlapping U_TURN / T_JUNCTION / SERVICE_ROAD / OFF_RAMP / ON_RAMP at this node
         working.forEachIndexed { idx, feat ->
           if (feat.anchorNodeId == userEntry.nodeId &&
-            feat.type in setOf(FeatureType.U_TURN, FeatureType.T_JUNCTION, FeatureType.SERVICE_ROAD)
+            feat.type in setOf(FeatureType.U_TURN, FeatureType.T_JUNCTION, FeatureType.SERVICE_ROAD, FeatureType.OFF_RAMP, FeatureType.ON_RAMP)
           ) {
             replacedIndices += idx
           }
@@ -2650,6 +2877,143 @@ object AheadGraphAnalyzer {
       }
     }
 
+    // 2b) DIVIDED ROAD FAR-SIDE SIDE STREETS across median (not dropped!)
+    if (dividedRoad != null) {
+      val partnerSeed = graph.ways[dividedRoad.partnerWayId]
+      val partnerWays =
+        if (partnerSeed != null) {
+          collectConnectedSameIdentityOneway(graph, partnerSeed, mode)
+        } else {
+          emptyList()
+        }
+      val partnerWayIds = partnerWays.mapTo(HashSet()) { it.id }
+      val partnerNodeSet = partnerWays.flatMapTo(HashSet()) { it.nodeIds }
+      val turnaroundAheadDists =
+        (
+          addedComposites
+            .filter { it.type == FeatureType.MEDIAN_OPENING }
+            .map { it.distanceMeters } +
+            working
+              .filter { it.type == FeatureType.ROUNDABOUT || it.type == FeatureType.MINI_ROUNDABOUT }
+              .map { it.distanceMeters }
+          )
+      val seenFarSideBranchKeys = HashSet<String>()
+      val farSidePts = buildCorridorTimeline(matched, fullTracedSegments)
+      val farSideSegs = fullTracedSegments.filter { it.cumDistAtP1 <= maxStandaloneLookahead }
+
+      if (farSideSegs.isNotEmpty()) {
+        for (pNid in partnerNodeSet) {
+          val pNodePt = graph.nodes[pNid]?.point ?: continue
+          val proj = projectPointOntoTracedSegments(pNodePt, farSideSegs, matched) ?: continue
+          if (proj.distMeters !in 2.0..maxStandaloneLookahead) continue
+          if (proj.lateralMeters > 75.0) continue
+
+          val wayIdsAtPartner = graph.nodeToWays[pNid].orEmpty()
+          for (wId in wayIdsAtPartner) {
+            if (wId in corridorWayIds || wId in partnerWayIds) continue
+            val sideWay = graph.ways[wId] ?: continue
+            if (!isRelevantForMode(sideWay, mode)) continue
+            val hw = sideWay.tags.highway?.lowercase()
+            if (hw in LINK_HIGHWAYS) continue
+            if (mode == TravelMode.DRIVING && hw == "service" && sideWay.tags.service?.lowercase() in IGNORED_DRIVING_SERVICES) {
+              continue
+            }
+            // Skip median-opening connectors linking directly to user corridor
+            if (GeoMath.polylineLengthMeters(sideWay.points) <= 85.0 &&
+              sideWay.nodeIds.any { it in corridorNodeDist }
+            ) {
+              continue
+            }
+
+            val pIdx = sideWay.nodeIds.indexOf(pNid)
+            if (pIdx < 0) continue
+            val dirOptions = listOfNotNull(
+              if (pIdx + 1 < sideWay.points.size) true else null,
+              if (pIdx - 1 >= 0) false else null,
+            )
+            for (outFwd in dirOptions) {
+              val slice = sliceWorldPath(sideWay, pIdx, outFwd, takeBack = false, maxMeters = 55.0)
+              if (slice.size < 2) continue
+              val outBearing = GeoMath.bearingDeg(slice[0], slice[1])
+              val signedDelta = GeoMath.signedAngleDelta(proj.bearingDeg, outBearing)
+              val onPartnerSide =
+                (dividedRoad.partnerSideOffsetMeters < 0.0 && signedDelta < -20.0) ||
+                  (dividedRoad.partnerSideOffsetMeters > 0.0 && signedDelta > 20.0)
+              if (!onPartnerSide) continue
+
+              val key = "${sideWay.id}_${outFwd}_${proj.distMeters.toInt() / 10}"
+              if (!seenFarSideBranchKeys.add(key)) continue
+
+              val rawStatus = evaluateBranchStatus(sideWay, outgoingForward = outFwd, mode = mode)
+              val hasTurnaroundAhead = turnaroundAheadDists.any { it > proj.distMeters }
+              val farStatus =
+                when {
+                  rawStatus == BranchStatus.BLOCKED -> BranchStatus.BLOCKED
+                  hasTurnaroundAhead -> BranchStatus.UNVERIFIED
+                  else -> BranchStatus.BLOCKED
+                }
+              val relDir =
+                if (signedDelta < 0.0) RelativeDirection.LEFT else RelativeDirection.RIGHT
+              val branchWorld = listOf(proj.point) + slice
+              val branch =
+                RoadBranch(
+                  badgeId = "1A",
+                  wayId = sideWay.id,
+                  name = BilingualName.fromOsmTags(sideWay.tags),
+                  leadsTo = BilingualName.destinationFromOsmTags(sideWay.tags),
+                  distanceMeters = proj.distMeters,
+                  status = farStatus,
+                  relativeDirection = relDir,
+                  bearingDeltaDeg = signedDelta,
+                  worldPoints = branchWorld,
+                  localPoints = branchWorld.map { GeoMath.projectToHeadingFrame(proj.point, proj.bearingDeg, it) },
+                  osmTags = sideWay.tags,
+                  isAcrossMedian = true,
+                  departurePoint = proj.point,
+                )
+
+              val existingIdx =
+                working.indexOfFirst { f ->
+                  abs(f.distanceMeters - proj.distMeters) <= 10.0 &&
+                    f.type in setOf(FeatureType.T_JUNCTION, FeatureType.Y_JUNCTION, FeatureType.FOUR_WAY)
+                }
+              if (existingIdx >= 0) {
+                val existing = working[existingIdx]
+                if (existing.branches.none { it.wayId == sideWay.id }) {
+                  val reprojected =
+                    branch.copy(
+                      localPoints = branchWorld.map { GeoMath.projectToHeadingFrame(existing.anchor, proj.bearingDeg, it) },
+                    )
+                  working[existingIdx] = existing.copy(branches = existing.branches + reprojected)
+                }
+              } else {
+                val incomingWorld = sliceWorldPath(proj.way, proj.segIdx, proj.forward, takeBack = true, maxMeters = 55.0)
+                val outgoingWorld = sliceWorldPath(proj.way, proj.segIdx, proj.forward, takeBack = false, maxMeters = 55.0)
+                addedComposites +=
+                  RoadFeature(
+                    index = 1,
+                    type = FeatureType.T_JUNCTION,
+                    distanceMeters = proj.distMeters,
+                    anchor = proj.point,
+                    anchorNodeId = null,
+                    incomingLocalPoints = incomingWorld.map { GeoMath.projectToHeadingFrame(proj.point, proj.bearingDeg, it) },
+                    incomingWorldPoints = incomingWorld,
+                    outgoingMainLocalPoints = outgoingWorld.map { GeoMath.projectToHeadingFrame(proj.point, proj.bearingDeg, it) },
+                    outgoingMainWorldPoints = outgoingWorld,
+                    branches = listOf(branch),
+                    osmTags = sideWay.tags,
+                    source = sideWay.source,
+                    ruleId = "divided_far_side_street",
+                    confidence = 0.85,
+                    dualCarriagewayOffsetMeters = dividedRoad.partnerSideOffsetMeters,
+                  )
+              }
+            }
+          }
+        }
+      }
+    }
+
     // 3) STAGGERED_JUNCTION: two T-junctions within 80m (Driving) / 40m (Walking) on opposite sides, minor bearings <= 20deg collinear
     val maxStaggerMeters = if (mode == TravelMode.DRIVING) 80.0 else 40.0
     val tCandidates =
@@ -2751,6 +3115,8 @@ object AheadGraphAnalyzer {
           corridorWayIds = corridorWayIds,
           rawFeatures = remainingAfterEarly,
           compositeCorridorMeters = compositeCorridorMeters,
+          maxStandaloneLookahead = maxStandaloneLookahead,
+          unreachableLinkLogsOut = unreachableLinkLogsOut,
         )
       if (interchangeResults.isNotEmpty()) {
         val hiddenIds = interchangeResults.flatMapTo(HashSet()) { res -> res.second }
@@ -2800,6 +3166,8 @@ object AheadGraphAnalyzer {
     corridorWayIds: Set<Long>,
     rawFeatures: List<RoadFeature>,
     compositeCorridorMeters: Double,
+    maxStandaloneLookahead: Double,
+    unreachableLinkLogsOut: MutableList<String>,
   ): List<Pair<RoadFeature, Set<Int>>> {
     // Identify grade separations in the 800m corridor
     val gradeSepFeatures =
@@ -2845,35 +3213,54 @@ object AheadGraphAnalyzer {
     val results = mutableListOf<Pair<RoadFeature, Set<Int>>>()
     val consumedFeatureIndices = HashSet<Int>()
     val consumedLinkIds = HashSet<Long>()
+    val corridorNodeDists = HashMap<Long, Double>()
+    for (cp in corridorTimeline) {
+      val nid = cp.nodeId ?: continue
+      if (cp.distMeters <= 600.0 && !corridorNodeDists.containsKey(nid)) {
+        corridorNodeDists[nid] = cp.distMeters
+      }
+    }
 
     for (clusterSeeds in seedClusters) {
       val centerDist = clusterSeeds.map { it.first }.average()
       val centerPt = clusterSeeds[clusterSeeds.size / 2].second
       val minSpanAllowed = (centerDist - 250.0).coerceAtLeast(0.0)
-      val maxSpanAllowed = (centerDist + 250.0).coerceAtMost(compositeCorridorMeters)
+      val maxSpanAllowed = (centerDist + 250.0).coerceAtMost(min(compositeCorridorMeters, 600.0))
 
-      // Gather link ways within this 500m corridor span (or within 300m of grade separation center)
-      val clusterLinkWays =
+      val directSeedLinks =
         linkWays.filter { lw ->
           if (lw.id in consumedLinkIds) return@filter false
-          val dToCenter = lw.points.minOf { GeoMath.haversineMeters(centerPt, it) }
-          if (dToCenter > 320.0) return@filter false
           val touchedDist =
-            lw.nodeIds.mapNotNull { nid ->
-              corridorTimeline.firstOrNull { it.nodeId == nid }?.distMeters
-            }.minOrNull()
-          if (touchedDist != null) {
-            touchedDist in minSpanAllowed..maxSpanAllowed
-          } else {
-            // Link starts/ends on the crossing road or chains into a corridor link
-            dToCenter <= 260.0
-          }
+            lw.nodeIds.mapNotNull { nid -> corridorNodeDists[nid] }.minOrNull()
+              ?: return@filter false
+          touchedDist in minSpanAllowed..maxSpanAllowed
         }
+
+      // Strictly expand <= 3 *_link hops respecting oneway from/to directSeedLinks
+      val reachableLinkIds =
+        collectReachableLinkChainIds(
+          graph = graph,
+          directSeeds = directSeedLinks,
+          corridorNodeDists = corridorNodeDists,
+          consumedLinkIds = consumedLinkIds,
+          maxHops = 3,
+        )
+
+      val clusterLinkWays = linkWays.filter { it.id in reachableLinkIds }
+
+      // Log nearby *_link within 350m that are NOT reachable from user's path
+      for (lw in linkWays) {
+        if (lw.id in consumedLinkIds || lw.id in reachableLinkIds) continue
+        val dToCenter = lw.points.minOf { GeoMath.haversineMeters(centerPt, it) }
+        if (dToCenter <= 350.0) {
+          unreachableLinkLogsOut += "way=${lw.id} (${lw.tags.highway}) @${dToCenter.toInt()}m: nearby, not reachable"
+        }
+      }
 
       if (clusterLinkWays.size < 2) continue
 
-      // Build logical ramps (chaining consecutive link ways sharing a link-only intermediate node)
-      val logicalRamps =
+      // Build logical ramps strictly departing/joining main path within lookahead
+      val allLogicalRamps =
         buildLogicalRamps(
           graph = graph,
           clusterLinks = clusterLinkWays,
@@ -2882,7 +3269,13 @@ object AheadGraphAnalyzer {
           fallbackCenterPt = centerPt,
           fallbackDist = centerDist,
         )
-      if (logicalRamps.size < 2) continue
+      val logicalRamps =
+        allLogicalRamps.filter { it.anchorOnCorridor != null && it.corridorDistMeters <= maxStandaloneLookahead }
+      val distinctCorridorLinkIds =
+        logicalRamps.flatMap { it.ways }.mapTo(HashSet()) { it.id }.count { wid ->
+          graph.ways[wid]?.tags?.highway?.lowercase() in LINK_HIGHWAYS
+        }
+      if (logicalRamps.size < 2 || distinctCorridorLinkIds < 2) continue
 
       // Determine cluster corridor span
       val allDists =
@@ -2916,6 +3309,7 @@ object AheadGraphAnalyzer {
         entryTimeline?.bearingDeg
           ?: GeoMath.bearingDeg(matched.snappedPoint, anchorPt)
 
+      // Never hide junctions or bridges/tunnels/overpasses/underpasses — ONLY merge standalone OFF_RAMP / ON_RAMP / MERGE
       val hiddenRaw =
         rawFeatures.filter { feat ->
           feat.index !in consumedFeatureIndices &&
@@ -2924,10 +3318,6 @@ object AheadGraphAnalyzer {
               FeatureType.OFF_RAMP,
               FeatureType.ON_RAMP,
               FeatureType.MERGE,
-              FeatureType.BRIDGE,
-              FeatureType.TUNNEL,
-              FeatureType.OVERPASS_ABOVE,
-              FeatureType.UNDERPASS_BELOW,
             )
         }
       hiddenRaw.forEach { consumedFeatureIndices += it.index }
@@ -2954,6 +3344,7 @@ object AheadGraphAnalyzer {
             worldPoints = ramp.worldSliceFromCorridor,
             localPoints = ramp.worldSliceFromCorridor.map { GeoMath.projectToHeadingFrame(anchorPt, anchorHeading, it) },
             osmTags = ramp.primaryWay.tags,
+            departurePoint = ramp.anchorOnCorridor,
           )
         }
 
@@ -2965,14 +3356,20 @@ object AheadGraphAnalyzer {
           takeBack = true,
           maxMeters = 60.0,
         )
+      val outgoingSpanM = (clusterMaxDist - clusterMinDist + 90.0).coerceIn(90.0, 300.0)
       val outgoingWorld =
-        sliceWorldPath(
-          entryTimeline?.way ?: matched.way,
-          entryTimeline?.nodeId?.let { nid -> entryTimeline.way.nodeIds.indexOf(nid).coerceAtLeast(0) } ?: matched.segmentIndex,
-          matched.forwardAlongWay,
-          takeBack = false,
-          maxMeters = 90.0,
-        )
+        corridorTimeline
+          .filter { it.distMeters in clusterMinDist..(clusterMinDist + outgoingSpanM) }
+          .map { it.point }
+          .ifEmpty {
+            sliceWorldPath(
+              entryTimeline?.way ?: matched.way,
+              entryTimeline?.nodeId?.let { nid -> entryTimeline.way.nodeIds.indexOf(nid).coerceAtLeast(0) } ?: matched.segmentIndex,
+              matched.forwardAlongWay,
+              takeBack = false,
+              maxMeters = 90.0,
+            )
+          }
 
       val crossingLocal =
         crossingRoadWays.firstOrNull()?.points?.map { GeoMath.projectToHeadingFrame(anchorPt, anchorHeading, it) }
@@ -2983,6 +3380,7 @@ object AheadGraphAnalyzer {
           index = 1,
           type = classified.type,
           distanceMeters = clusterMinDist,
+          rangeEndDistanceMeters = clusterMaxDist.takeIf { it > clusterMinDist + 5.0 },
           anchor = anchorPt,
           anchorNodeId = entryTimeline?.nodeId,
           incomingLocalPoints = incomingWorld.map { GeoMath.projectToHeadingFrame(anchorPt, anchorHeading, it) },
@@ -2991,8 +3389,8 @@ object AheadGraphAnalyzer {
           outgoingMainWorldPoints = outgoingWorld,
           branches = branches,
           osmTags = entryTimeline?.way?.tags ?: matched.way.tags,
-          isBridge = hiddenRaw.any { it.isBridge || it.type == FeatureType.BRIDGE },
-          isTunnel = hiddenRaw.any { it.isTunnel || it.type == FeatureType.TUNNEL },
+          isBridge = gradeSepFeatures.any { it.distanceMeters in (clusterMinDist - 20.0)..(clusterMaxDist + 20.0) && (it.isBridge || it.type == FeatureType.BRIDGE) },
+          isTunnel = gradeSepFeatures.any { it.distanceMeters in (clusterMinDist - 20.0)..(clusterMaxDist + 20.0) && (it.isTunnel || it.type == FeatureType.TUNNEL) },
           source =
             if (clusterLinkWays.any { it.source == GraphDataSource.OVERPASS }) GraphDataSource.OVERPASS
             else matched.way.source,
@@ -3006,6 +3404,89 @@ object AheadGraphAnalyzer {
     }
 
     return results
+  }
+
+  private fun collectReachableLinkChainIds(
+    graph: RoadGraph,
+    directSeeds: List<OsmWay>,
+    corridorNodeDists: Map<Long, Double>,
+    consumedLinkIds: Set<Long>,
+    maxHops: Int = 3,
+  ): Set<Long> {
+    if (directSeeds.isEmpty()) return emptySet()
+    val visited = HashSet<Long>()
+    // Queue stores (way, hop, isExitFlow) — isExitFlow=true travels forward along oneway; false travels reverse along oneway
+    val queue = ArrayDeque<Triple<OsmWay, Int, Boolean>>()
+
+    for (seed in directSeeds) {
+      val sharedNids = seed.nodeIds.filter { it in corridorNodeDists }
+      var addedMode = false
+      for (nid in sharedNids) {
+        val idx = seed.nodeIds.indexOf(nid)
+        if (idx < 0) continue
+        val ow = seed.tags.effectiveOneway()
+        val canLeaveFromCorridor =
+          (idx + 1 < seed.points.size && ow != "-1") ||
+            (idx - 1 >= 0 && ow != "yes")
+        val canEnterCorridor =
+          (idx - 1 >= 0 && ow != "-1") ||
+            (idx + 1 < seed.points.size && ow != "yes")
+        if (canLeaveFromCorridor) {
+          visited += seed.id
+          queue.addLast(Triple(seed, 0, true))
+          addedMode = true
+        }
+        if (canEnterCorridor) {
+          visited += seed.id
+          queue.addLast(Triple(seed, 0, false))
+          addedMode = true
+        }
+      }
+      if (!addedMode && seed.id !in visited) {
+        visited += seed.id
+        queue.addLast(Triple(seed, 0, true))
+      }
+    }
+
+    while (queue.isNotEmpty()) {
+      val (curr, hop, exitFlow) = queue.removeFirst()
+      if (hop >= maxHops) continue
+      val ow = curr.tags.effectiveOneway()
+      // Collect nodes reachable on curr in the traversal direction
+      val reachableNodes =
+        when {
+          ow == null || ow == "no" -> curr.nodeIds
+          exitFlow && ow == "yes" -> curr.nodeIds.drop(1)
+          exitFlow && ow == "-1" -> curr.nodeIds.dropLast(1)
+          !exitFlow && ow == "yes" -> curr.nodeIds.dropLast(1)
+          !exitFlow && ow == "-1" -> curr.nodeIds.drop(1)
+          else -> curr.nodeIds
+        }
+
+      for (nid in reachableNodes) {
+        for (nextId in graph.nodeToWays[nid].orEmpty()) {
+          if (nextId == curr.id || nextId in consumedLinkIds || nextId in visited) continue
+          val nextWay = graph.ways[nextId] ?: continue
+          if (nextWay.tags.highway?.lowercase() !in LINK_HIGHWAYS) continue
+          val nIdx = nextWay.nodeIds.indexOf(nid)
+          if (nIdx < 0) continue
+          val nextOw = nextWay.tags.effectiveOneway()
+          val validTransition =
+            if (exitFlow) {
+              (nIdx + 1 < nextWay.points.size && nextOw != "-1") ||
+                (nIdx - 1 >= 0 && nextOw != "yes")
+            } else {
+              (nIdx - 1 >= 0 && nextOw != "-1") ||
+                (nIdx + 1 < nextWay.points.size && nextOw != "yes")
+            }
+          if (validTransition) {
+            visited += nextId
+            queue.addLast(Triple(nextWay, hop + 1, exitFlow))
+          }
+        }
+      }
+    }
+    return visited
   }
 
   private fun buildLogicalRamps(
@@ -3078,13 +3559,13 @@ object AheadGraphAnalyzer {
       if (bestTimeline != null && bestNodeOnSeed != null) {
         val idx = bestAnchorWay.nodeIds.indexOf(bestNodeOnSeed).coerceAtLeast(0)
         val canFwd = idx + 1 < bestAnchorWay.points.size
-        worldSlice = sliceWorldPath(bestAnchorWay, idx, canFwd, takeBack = false, maxMeters = 95.0)
+        worldSlice = sliceWorldPath(bestAnchorWay, idx, canFwd, takeBack = false, maxMeters = 60.0)
         status = evaluateBranchStatus(bestAnchorWay, canFwd, TravelMode.DRIVING)
         entryBearing =
           if (worldSlice.size >= 2) GeoMath.bearingDeg(worldSlice[0], worldSlice[1])
           else bestTimeline.bearingDeg
       } else {
-        worldSlice = pts.take(8)
+        worldSlice = pts.take(6)
         status = evaluateBranchStatus(seed, true, TravelMode.DRIVING)
         entryBearing =
           if (pts.size >= 2) GeoMath.bearingDeg(pts[0], pts[1])
@@ -3232,6 +3713,9 @@ object AheadGraphAnalyzer {
     crossingRoadWays: List<OsmWay>,
     centerPt: GeoPoint,
   ): ClassificationOutcome {
+    if (ramps.size > 6) {
+      return ClassificationOutcome(FeatureType.INTERCHANGE, "interchange_generic_large", 0.78)
+    }
     val loopCount = ramps.count { it.isLoop }
     val nonLoopRamps = ramps.filter { !it.isLoop }
     val flyoverCount = ramps.count { it.isFlyover }
@@ -3486,7 +3970,18 @@ object AheadGraphAnalyzer {
         val gwMid = gw.points[gw.points.size / 2]
         val d = GeoMath.haversineMeters(center, gwMid)
         if (d > radiusMeters) continue
-        val nearbyLinks = linkWays.filter { lw -> lw.points.any { GeoMath.haversineMeters(gwMid, it) < 280.0 } }
+        val gwNodes = gw.nodeIds.associateWith { 0.0 }
+        val directSeedLinks =
+          linkWays.filter { lw -> lw.nodeIds.any { it in gwNodes } }
+        val reachableIds =
+          collectReachableLinkChainIds(
+            graph = graph,
+            directSeeds = directSeedLinks,
+            corridorNodeDists = gwNodes,
+            consumedLinkIds = emptySet(),
+            maxHops = 3,
+          )
+        val nearbyLinks = linkWays.filter { it.id in reachableIds }
         if (nearbyLinks.size < 2) continue
         seenClusterKeys += gw.id
         val ramps =
@@ -3514,5 +4009,317 @@ object AheadGraphAnalyzer {
         addHit(CensusHit(effectiveType, d, gwMid, jp, hdg, "IC_${gw.id}"))
       }
     }
+  }
+
+  private data class ProjectedCorridorHit(
+    val point: GeoPoint,
+    val distMeters: Double,
+    val lateralMeters: Double,
+    val bearingDeg: Double,
+    val way: OsmWay,
+    val segIdx: Int,
+    val forward: Boolean,
+  )
+
+  private fun projectPointOntoTracedSegments(
+    target: GeoPoint,
+    tracedSegments: List<TracedSegment>,
+    matched: RoadCandidate,
+  ): ProjectedCorridorHit? {
+    var best: ProjectedCorridorHit? = null
+    for (seg in tracedSegments) {
+      val proj = GeoMath.projectPointOnSegment(target, seg.p1, seg.p2)
+      if (best == null || proj.distanceMeters < best.lateralMeters) {
+        best =
+          ProjectedCorridorHit(
+            point = proj.snappedPoint,
+            distMeters = seg.cumDistAtP1 + seg.segLenMeters * proj.t,
+            lateralMeters = proj.distanceMeters,
+            bearingDeg = seg.bearingDeg,
+            way = seg.way,
+            segIdx = seg.idx1,
+            forward = seg.forward,
+          )
+      }
+    }
+    return best
+  }
+
+  private data class RawCurveCandidate(
+    val startSampleIdx: Int,
+    val endSampleIdx: Int,
+    val startDist: Double,
+    val endDist: Double,
+    val totalAngleDeg: Double,
+    val minRadiusMeters: Double,
+    val direction: RelativeDirection,
+    val startPt: GeoPoint,
+  )
+
+  private fun detectPathCurves(
+    matched: RoadCandidate,
+    tracedSegments: List<TracedSegment>,
+    maxLookahead: Double,
+  ): List<RoadFeature> {
+    if (tracedSegments.isEmpty()) return emptyList()
+    val rawPts = ArrayList<GeoPoint>(tracedSegments.size + 1)
+    rawPts += matched.snappedPoint
+    for (seg in tracedSegments) {
+      if (GeoMath.haversineMeters(rawPts.last(), seg.p2) > 0.3) {
+        rawPts += seg.p2
+      }
+    }
+    val curves = extractCurveFeaturesFromPoints(rawPts, source = matched.way.source, osmTags = matched.way.tags)
+    return curves.filter { it.distanceMeters <= maxLookahead }
+  }
+
+  private fun detectWayCurvesForCensus(way: OsmWay): List<RoadFeature> =
+    extractCurveFeaturesFromPoints(way.points, source = way.source, osmTags = way.tags)
+
+  private fun resamplePathEveryMeters(
+    points: List<GeoPoint>,
+    stepMeters: Double = 5.0,
+  ): Pair<List<GeoPoint>, DoubleArray> {
+    if (points.size < 2) return emptyList<GeoPoint>() to DoubleArray(0)
+    val resampled = ArrayList<GeoPoint>()
+    val dists = ArrayList<Double>()
+    resampled += points.first()
+    dists += 0.0
+
+    var nextSampleDist = stepMeters
+    var accum = 0.0
+    for (i in 0 until points.lastIndex) {
+      val a = points[i]
+      val b = points[i + 1]
+      val segLen = GeoMath.haversineMeters(a, b)
+      if (segLen < 0.05) continue
+      while (accum + segLen >= nextSampleDist) {
+        val t = ((nextSampleDist - accum) / segLen).coerceIn(0.0, 1.0)
+        resampled += GeoPoint(a.lat + (b.lat - a.lat) * t, a.lon + (b.lon - a.lon) * t)
+        dists += nextSampleDist
+        nextSampleDist += stepMeters
+      }
+      accum += segLen
+    }
+    if (accum - dists.last() >= 1.5) {
+      resampled += points.last()
+      dists += accum
+    }
+    return resampled to dists.toDoubleArray()
+  }
+
+  private fun extractCurveFeaturesFromPoints(
+    points: List<GeoPoint>,
+    source: GraphDataSource,
+    osmTags: OsmTags,
+  ): List<RoadFeature> {
+    val (samples, dists) = resamplePathEveryMeters(points, 5.0)
+    if (samples.size < 4) return emptyList()
+
+    val segCount = samples.size - 1
+    val segBearings = DoubleArray(segCount) { i -> GeoMath.bearingDeg(samples[i], samples[i + 1]) }
+    val stepTurns = DoubleArray(segCount)
+    val cumHeading = DoubleArray(segCount)
+    for (i in 1 until segCount) {
+      val d = GeoMath.signedAngleDelta(segBearings[i - 1], segBearings[i])
+      stepTurns[i] = d
+      cumHeading[i] = cumHeading[i - 1] + d
+    }
+
+    // 40 m sliding window heading change centered around each vertex
+    val windowHalfSteps = 4 // 4 * 5m back + 4 * 5m ahead = 40m window
+    val windowDelta = DoubleArray(segCount) { i ->
+      val wStart = (i - windowHalfSteps).coerceAtLeast(0)
+      val wEnd = (i + windowHalfSteps).coerceAtMost(segCount - 1)
+      cumHeading[wEnd] - cumHeading[wStart]
+    }
+
+    // Group continuous turning in one direction
+    val rawRuns = mutableListOf<RawCurveCandidate>()
+    var i = 1
+    while (i < segCount) {
+      val sign =
+        when {
+          stepTurns[i] <= -1.2 || (stepTurns[i] < -0.3 && windowDelta[i] <= -12.0) -> -1
+          stepTurns[i] >= 1.2 || (stepTurns[i] > 0.3 && windowDelta[i] >= 12.0) -> 1
+          else -> 0
+        }
+      if (sign == 0) {
+        i++
+        continue
+      }
+      val startV = i
+      var endV = i
+      var j = i + 1
+      while (j < segCount) {
+        val st = stepTurns[j]
+        val matchesSign =
+          (sign < 0 && (st <= -1.0 || (st <= 0.3 && windowDelta[j] <= -12.0))) ||
+            (sign > 0 && (st >= 1.0 || (st >= -0.3 && windowDelta[j] >= 12.0)))
+        if (!matchesSign) break
+        endV = j
+        j++
+      }
+
+      val preIdx = (startV - 1).coerceAtLeast(0)
+      val postSampleIdx = (endV + 1).coerceAtMost(samples.lastIndex)
+      val totalAngle = abs(cumHeading[endV] - cumHeading[preIdx])
+      if (totalAngle >= 8.0) {
+        val startD = dists[preIdx]
+        val endD = dists[postSampleIdx]
+        val minRad = computeCurveMinRadius(samples, preIdx, postSampleIdx, startD, endD, totalAngle)
+        rawRuns +=
+          RawCurveCandidate(
+            startSampleIdx = preIdx,
+            endSampleIdx = postSampleIdx,
+            startDist = startD,
+            endDist = endD,
+            totalAngleDeg = totalAngle,
+            minRadiusMeters = minRad,
+            direction = if (sign < 0) RelativeDirection.LEFT else RelativeDirection.RIGHT,
+            startPt = samples[preIdx],
+          )
+      }
+      i = endV + 1
+    }
+
+    if (rawRuns.isEmpty()) return emptyList()
+
+    // Merge curves of the same direction within 30 m
+    val merged = mutableListOf<RawCurveCandidate>()
+    for (run in rawRuns) {
+      val prev = merged.lastOrNull()
+      if (prev != null && prev.direction == run.direction && (run.startDist - prev.endDist) <= 30.0) {
+        val preIdx = prev.startSampleIdx
+        val endV = (run.endSampleIdx - 1).coerceIn(preIdx, segCount - 1)
+        val totalAngle = abs(cumHeading[endV] - cumHeading[preIdx])
+        val startD = dists[preIdx]
+        val endD = dists[run.endSampleIdx]
+        val minRad = computeCurveMinRadius(samples, preIdx, run.endSampleIdx, startD, endD, totalAngle)
+        merged[merged.lastIndex] =
+          RawCurveCandidate(
+            startSampleIdx = preIdx,
+            endSampleIdx = run.endSampleIdx,
+            startDist = startD,
+            endDist = endD,
+            totalAngleDeg = totalAngle,
+            minRadiusMeters = minRad,
+            direction = prev.direction,
+            startPt = samples[preIdx],
+          )
+      } else {
+        merged += run
+      }
+    }
+
+    // Filter to qualifying SHARP_CURVE (>=45° & R<=85m) and HAIRPIN (>=120°)
+    val qualified =
+      merged.filter { c ->
+        c.totalAngleDeg >= 120.0 || (c.totalAngleDeg >= 45.0 && c.minRadiusMeters <= 85.0)
+      }
+    if (qualified.isEmpty()) return emptyList()
+
+    // S-bend sequence (>= 3 alternating curves within 250 m) -> ONE WINDING_ROAD feature
+    val result = mutableListOf<RoadFeature>()
+    var idx = 0
+    while (idx < qualified.size) {
+      val run = mutableListOf(qualified[idx])
+      var k = idx + 1
+      while (k < qualified.size) {
+        val prev = run.last()
+        val next = qualified[k]
+        if (next.direction != prev.direction && (next.startDist - prev.endDist) <= 250.0 &&
+          (next.startDist - run.first().startDist) <= 250.0
+        ) {
+          run += next
+          k++
+        } else {
+          break
+        }
+      }
+
+      if (run.size >= 3) {
+        val first = run.first()
+        val last = run.last()
+        val sharpest = run.maxBy { it.totalAngleDeg }
+        val heading = segBearings[first.startSampleIdx.coerceIn(0, segCount - 1)]
+        val inStart = (first.startSampleIdx - 8).coerceAtLeast(0)
+        val incomingWorld = samples.subList(inStart, (first.startSampleIdx + 1).coerceAtMost(samples.size))
+        val outgoingWorld = samples.subList(first.startSampleIdx, (last.endSampleIdx + 1).coerceAtMost(samples.size))
+        result +=
+          RoadFeature(
+            index = 1,
+            type = FeatureType.WINDING_ROAD,
+            distanceMeters = first.startDist,
+            curveEndDistanceMeters = last.endDist,
+            anchor = first.startPt,
+            anchorNodeId = null,
+            incomingLocalPoints = incomingWorld.map { GeoMath.projectToHeadingFrame(first.startPt, heading, it) },
+            incomingWorldPoints = incomingWorld,
+            outgoingMainLocalPoints = outgoingWorld.map { GeoMath.projectToHeadingFrame(first.startPt, heading, it) },
+            outgoingMainWorldPoints = outgoingWorld,
+            branches = emptyList(),
+            osmTags = osmTags,
+            curveAngleDeg = sharpest.totalAngleDeg,
+            curveRadiusMeters = sharpest.minRadiusMeters,
+            curveDirection = sharpest.direction,
+            windingCurveCount = run.size,
+            source = source,
+            ruleId = "geom_winding_road",
+            confidence = 0.90,
+          )
+        idx = k
+      } else {
+        val c = qualified[idx]
+        val fType = if (c.totalAngleDeg >= 120.0) FeatureType.HAIRPIN else FeatureType.SHARP_CURVE
+        val heading = segBearings[c.startSampleIdx.coerceIn(0, segCount - 1)]
+        val inStart = (c.startSampleIdx - 8).coerceAtLeast(0)
+        val incomingWorld = samples.subList(inStart, (c.startSampleIdx + 1).coerceAtMost(samples.size))
+        val outgoingWorld = samples.subList(c.startSampleIdx, (c.endSampleIdx + 1).coerceAtMost(samples.size))
+        result +=
+          RoadFeature(
+            index = 1,
+            type = fType,
+            distanceMeters = c.startDist,
+            curveEndDistanceMeters = c.endDist,
+            anchor = c.startPt,
+            anchorNodeId = null,
+            incomingLocalPoints = incomingWorld.map { GeoMath.projectToHeadingFrame(c.startPt, heading, it) },
+            incomingWorldPoints = incomingWorld,
+            outgoingMainLocalPoints = outgoingWorld.map { GeoMath.projectToHeadingFrame(c.startPt, heading, it) },
+            outgoingMainWorldPoints = outgoingWorld,
+            branches = emptyList(),
+            osmTags = osmTags,
+            curveAngleDeg = c.totalAngleDeg,
+            curveRadiusMeters = c.minRadiusMeters,
+            curveDirection = c.direction,
+            source = source,
+            ruleId = if (fType == FeatureType.HAIRPIN) "geom_hairpin_curve" else "geom_sharp_curve",
+            confidence = 0.92,
+          )
+        idx++
+      }
+    }
+    return result
+  }
+
+  private fun computeCurveMinRadius(
+    samples: List<GeoPoint>,
+    startIdx: Int,
+    endIdx: Int,
+    startDist: Double,
+    endDist: Double,
+    totalAngleDeg: Double,
+  ): Double {
+    val arcLen = (endDist - startDist).coerceAtLeast(5.0)
+    var minRadius = arcLen / Math.toRadians(totalAngleDeg.coerceAtLeast(1.0))
+    val chordStep = if (endIdx - startIdx >= 4) 2 else 1
+    for (j in (startIdx + chordStep)..(endIdx - chordStep)) {
+      val (ang, rad) = GeoMath.turningAngleAndRadius(samples[j - chordStep], samples[j], samples[j + chordStep])
+      if (ang >= 8.0 && rad < minRadius) {
+        minRadius = rad
+      }
+    }
+    return minRadius.coerceAtLeast(3.0)
   }
 }

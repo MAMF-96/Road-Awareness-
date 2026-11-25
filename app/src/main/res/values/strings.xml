@@ -45,12 +45,13 @@
     <string name="branch_blocked_reason">One-way against you</string>
     <string name="branch_unverified">Unverified</string>
     <string name="unknown_value">Unknown</string>
-    <string name="unnamed_branch">Unnamed</string>
+    <string name="unnamed_branch">Unnamed street</string>
     <string name="leads_to_format">Leads to %1$s</string>
     <string name="leads_to_unknown">Unknown</string>
     <string name="dir_left">Left</string>
     <string name="dir_right">Right</string>
     <string name="dir_ahead">Ahead</string>
+    <string name="dir_across_median_format">%1$s (across the median)</string>
     <string name="more_branches_format">+%1$d</string>
     <string name="upcoming_features_title">Upcoming features</string>
     <string name="parallel_candidates_format">%1$s / %2$s</string>
@@ -75,6 +76,8 @@
     <string name="feature_cul_de_sac">Cul-de-Sac</string>
     <string name="feature_service_road">Service Road</string>
     <string name="feature_sharp_curve">Sharp Curve</string>
+    <string name="feature_hairpin">Hairpin Curve</string>
+    <string name="feature_winding_road">Winding Road</string>
     <string name="feature_footpath">Footpath</string>
     <string name="feature_crosswalk">Crosswalk</string>
     <string name="feature_footbridge">Footbridge</string>
@@ -102,6 +105,8 @@
     <string name="median_opening_subtitle">Median opening / U-turn</string>
     <string name="frontage_road_left">Service/frontage road (left)</string>
     <string name="frontage_road_right">Service/frontage road (right)</string>
+    <string name="curve_arc_label_format">%1$s %2$d° · R %3$d m</string>
+    <string name="winding_road_subtitle_format">%1$d curves · max %2$d°</string>
     <string name="inspector_feature_census">Feature census (1.5 km)</string>
     <string name="inspector_census_empty">No features within 1.5 km</string>
     <string name="inspector_jump">Jump</string>

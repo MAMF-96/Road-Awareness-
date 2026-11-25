@@ -1454,6 +1454,57 @@ fun GraphInspectorBottomSheet(
                       modifier = Modifier.testTag("inspector_nearby_tile_labels"),
                     )
                   }
+                  val borderStats = uiState.pipelineDiagnostics.borderStitchStats
+                  if (borderStats.totalBorderEndpoints > 0) {
+                    Text(
+                      text = "Borders: total=${borderStats.totalBorderEndpoints} conn=${borderStats.connectedBorderEndpoints} unconn=${borderStats.unconnectedBorderEndpoints}",
+                      fontFamily = FontFamily.Monospace,
+                      fontSize = 9.sp,
+                      lineHeight = 12.sp,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant,
+                      modifier = Modifier.testTag("inspector_border_stats"),
+                    )
+                    borderStats.worstUnconnected.take(5).forEachIndexed { bIdx, ep ->
+                      Text(
+                        text = String.format(Locale.US, "  unconn[%d]: %.5f,%.5f %s @%s", bIdx + 1, ep.lat, ep.lon, ep.roadClass, ep.tileKey),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        lineHeight = 11.sp,
+                        color = roadColors.unverifiedText,
+                      )
+                    }
+                  }
+                  if (uiState.tracedPathSegments.isNotEmpty()) {
+                    Text(
+                      text = "Main path trace (${uiState.tracedPathSegments.size} segs):",
+                      fontFamily = FontFamily.Monospace,
+                      fontSize = 9.sp,
+                      fontWeight = FontWeight.Bold,
+                      color = MaterialTheme.colorScheme.primary,
+                      modifier = Modifier.testTag("inspector_path_trace"),
+                    )
+                    uiState.tracedPathSegments.take(8).forEach { seg ->
+                      val ow = seg.oneway ?: "-"
+                      val fork = seg.forkReason?.let { " [$it]" } ?: ""
+                      Text(
+                        text = String.format(Locale.US, "  way=%d %s (%s 1w=%s) %.0f..%.0fm%s", seg.wayId, seg.name.take(20), seg.highway, ow, seg.startDistMeters, seg.endDistMeters, fork),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        lineHeight = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                      )
+                    }
+                  }
+                  if (uiState.nearbyUnreachableLinks.isNotEmpty()) {
+                    Text(
+                      text = "Links skipped: " + uiState.nearbyUnreachableLinks.take(5).joinToString(" | "),
+                      fontFamily = FontFamily.Monospace,
+                      fontSize = 9.sp,
+                      lineHeight = 11.sp,
+                      color = roadColors.unverifiedText,
+                      modifier = Modifier.testTag("inspector_unreachable_links"),
+                    )
+                  }
                 }
               }
             }
@@ -2993,6 +3044,8 @@ private fun shortFeatureTypeName(type: FeatureType): String =
     FeatureType.CUL_DE_SAC -> "Cul-de-Sac"
     FeatureType.SERVICE_ROAD -> "Service Rd"
     FeatureType.SHARP_CURVE -> "Sharp Curve"
+    FeatureType.HAIRPIN -> "Hairpin"
+    FeatureType.WINDING_ROAD -> "Winding Rd"
     FeatureType.FOOTPATH -> "Footpath"
     FeatureType.CROSSWALK -> "Crosswalk"
     FeatureType.FOOTBRIDGE -> "Footbridge"

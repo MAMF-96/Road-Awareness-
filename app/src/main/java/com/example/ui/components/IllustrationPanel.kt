@@ -41,16 +41,19 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.AltRoute
 import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.ExploreOff
 import androidx.compose.material.icons.filled.GpsNotFixed
 import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Map
@@ -841,6 +844,7 @@ private fun LandscapeSidePanelContent(
               val simSelectable = BuildConfig.DEBUG && uiState.isMockModeActive
               WholeRowBranchPacker(
                 itemCount = selectedFeature.branches.size,
+                maxFittedItems = if (selectedFeature.isInterchangeGroup() && !isExpanded) 3 else Int.MAX_VALUE,
                 spacingDp = if (compactSpace) 2.dp else 4.dp,
                 modifier = Modifier.fillMaxSize(),
                 itemContent = { idx, forMeasurementOnly ->
@@ -1069,6 +1073,7 @@ private fun MoreBranchesChip(
 @Composable
 private fun WholeRowBranchPacker(
   itemCount: Int,
+  maxFittedItems: Int = Int.MAX_VALUE,
   spacingDp: Dp = 4.dp,
   modifier: Modifier = Modifier,
   itemContent: @Composable (index: Int, forMeasurementOnly: Boolean) -> Unit,
@@ -1093,6 +1098,7 @@ private fun WholeRowBranchPacker(
     var fittedCount = 0
 
     for (i in 0 until itemCount) {
+      if (fittedCount >= maxFittedItems) break
       val measured = subcompose("probe_item_$i") { itemContent(i, true) }.firstOrNull()?.measure(itemConstraints) ?: continue
       val gapBefore = if (fittedCount > 0) spacingPx else 0
       val remainingAfterThis = itemCount - (i + 1)
@@ -1207,7 +1213,11 @@ private fun LandscapeSideCompactBranchRow(
   onClickForSimulation: (() -> Unit)? = null,
 ) {
   val badgeColor = RoadColors.pinColorForIndex(featureIndex)
-  val dirLabel = relativeDirText(branch.relativeDirection)
+  val rawDirLabel = relativeDirText(branch.relativeDirection)
+  val dirLabel =
+    if (branch.isAcrossMedian) stringResource(R.string.dir_across_median_format, rawDirLabel)
+    else rawDirLabel
+  val classIcon = branchRoadClassIcon(branch.osmTags.highway)
   val (statusWord, statusIcon, statusFg, statusBg) = branchStatusVisuals(branch.status)
   val isRoadWorksBranch =
     parentType == FeatureType.ROAD_WORKS ||
@@ -1251,6 +1261,12 @@ private fun LandscapeSideCompactBranchRow(
           ) {
             Text(text = branch.badgeId, color = Color.White, fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold)
           }
+          Icon(
+            imageVector = classIcon,
+            contentDescription = branch.osmTags.highway ?: "road",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(12.dp),
+          )
           Text(
             text = dirLabel,
             fontSize = 10.sp,
@@ -1323,6 +1339,12 @@ private fun LandscapeSideCompactBranchRow(
             ) {
               Text(text = branch.badgeId, color = Color.White, fontSize = 10.sp, lineHeight = 12.sp, fontWeight = FontWeight.Bold)
             }
+            Icon(
+              imageVector = classIcon,
+              contentDescription = branch.osmTags.highway ?: "road",
+              tint = MaterialTheme.colorScheme.onSurfaceVariant,
+              modifier = Modifier.size(12.dp),
+            )
             Text(
               text = dirLabel,
               fontSize = 10.sp,
@@ -1843,9 +1865,16 @@ private fun FeatureHeaderTitle(
     }
     selectedFeature != null -> {
       val distStr = formatRoadDistance(selectedFeature.distanceMeters, uiState.effectiveUnitSystem)
+      val endRange = selectedFeature.rangeEndDistanceMeters
+      val rangeStr =
+        if (selectedFeature.isInterchangeGroup() && endRange != null && endRange > selectedFeature.distanceMeters + 5.0) {
+          "$distStr–${formatRoadDistance(endRange, uiState.effectiveUnitSystem)}"
+        } else {
+          distStr
+        }
       val typeStr = featureTypeTitle(selectedFeature.effectiveDisplayType())
       AutoShrinkSingleLineText(
-        text = "$distStr · $typeStr",
+        text = "$rangeStr · $typeStr",
         preferredFontSize = preferredFontSize,
         minFontSize = minFontSize,
         fontWeight = FontWeight.Bold,
@@ -2451,7 +2480,11 @@ private fun PortraitBranchRow(
   val roadColors = LocalRoadColors.current
   val isDark = LocalGlassConfig.current.isDark
   val badgeColor = RoadColors.pinColorForIndex(featureIndex)
-  val dirLabel = relativeDirText(branch.relativeDirection)
+  val rawDirLabel = relativeDirText(branch.relativeDirection)
+  val dirLabel =
+    if (branch.isAcrossMedian) stringResource(R.string.dir_across_median_format, rawDirLabel)
+    else rawDirLabel
+  val classIcon = branchRoadClassIcon(branch.osmTags.highway)
   val (statusWord, statusIcon, statusFg, statusBg) = branchStatusVisuals(branch.status)
   val isLink = branch.osmTags.highway?.lowercase()?.endsWith("_link") == true
   val isRoadWorksBranch =
@@ -2492,6 +2525,12 @@ private fun PortraitBranchRow(
           ) {
             Text(text = branch.badgeId, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
           }
+          Icon(
+            imageVector = classIcon,
+            contentDescription = branch.osmTags.highway ?: "road",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(13.dp),
+          )
           Text(
             text = dirLabel,
             fontSize = 11.sp,
@@ -2695,6 +2734,19 @@ private fun NonBranchingDetailRow(
         else stringResource(R.string.frontage_road_right)
       FeatureType.STAGGERED_JUNCTION ->
         feature.staggerOffsetMeters?.let { stringResource(R.string.staggered_offset_format, formatRoadDistance(it, unitSystem)) }
+      FeatureType.SHARP_CURVE, FeatureType.HAIRPIN ->
+        if (feature.curveAngleDeg != null && feature.curveRadiusMeters != null) {
+          val dirWord = relativeDirText(feature.curveDirection ?: RelativeDirection.AHEAD)
+          stringResource(R.string.curve_arc_label_format, dirWord, feature.curveAngleDeg.toInt(), feature.curveRadiusMeters.toInt())
+        } else {
+          null
+        }
+      FeatureType.WINDING_ROAD ->
+        if (feature.windingCurveCount != null && feature.curveAngleDeg != null) {
+          stringResource(R.string.winding_road_subtitle_format, feature.windingCurveCount, feature.curveAngleDeg.toInt())
+        } else {
+          null
+        }
       else -> null
     }
   val fallbackName = subtitle ?: featureTypeTitle(displayType)
@@ -2722,7 +2774,7 @@ private fun NonBranchingDetailRow(
           maxLinesPerScript = 2,
           modifier = Modifier.weight(1f),
         )
-        if (feature.curveAngleDeg != null && feature.curveRadiusMeters != null) {
+        if (feature.curveAngleDeg != null && feature.curveRadiusMeters != null && displayType != FeatureType.WINDING_ROAD) {
           Text(
             text = "${feature.curveAngleDeg.toInt()}° · R ${feature.curveRadiusMeters.toInt()}m",
             fontSize = 14.sp,
@@ -2743,6 +2795,15 @@ private fun NonBranchingDetailRow(
     }
   }
 }
+
+private fun branchRoadClassIcon(highway: String?) =
+  when (highway?.lowercase()) {
+    "motorway", "trunk", "primary" -> Icons.Default.DirectionsCar
+    "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link" -> Icons.AutoMirrored.Filled.AltRoute
+    "secondary", "tertiary" -> Icons.Default.Directions
+    "service", "track" -> Icons.Default.SwapHoriz
+    else -> Icons.Default.Home
+  }
 
 /**
  * Floating status chips rendered directly BELOW the top card over the map, only when conditions apply.

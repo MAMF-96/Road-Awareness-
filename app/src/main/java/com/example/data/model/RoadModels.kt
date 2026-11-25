@@ -271,6 +271,22 @@ data class LoadedTileBounds(
   val east: Double,
 )
 
+@Immutable
+data class BorderEndpointInfo(
+  val lat: Double,
+  val lon: Double,
+  val roadClass: String,
+  val tileKey: String,
+)
+
+@Immutable
+data class BorderStitchStats(
+  val totalBorderEndpoints: Int = 0,
+  val connectedBorderEndpoints: Int = 0,
+  val unconnectedBorderEndpoints: Int = 0,
+  val worstUnconnected: List<BorderEndpointInfo> = emptyList(),
+)
+
 data class RoadGraph(
   val nodes: Map<Long, OsmNode>,
   val ways: Map<Long, OsmWay>,
@@ -279,6 +295,7 @@ data class RoadGraph(
   val fromCache: Boolean,
   val source: GraphDataSource = GraphDataSource.OVERPASS,
   val loadedTiles: List<LoadedTileBounds> = emptyList(),
+  val borderStitchStats: BorderStitchStats = BorderStitchStats(),
 )
 
 enum class BranchStatus {
@@ -320,6 +337,8 @@ enum class FeatureType {
   CUL_DE_SAC,
   SERVICE_ROAD,
   SHARP_CURVE,
+  HAIRPIN,
+  WINDING_ROAD,
   FOOTPATH,
   CROSSWALK,
   FOOTBRIDGE,
@@ -473,6 +492,8 @@ data class RoadBranch(
   val worldPoints: List<GeoPoint>,
   val localPoints: List<LocalPoint>,
   val osmTags: OsmTags,
+  val isAcrossMedian: Boolean = false,
+  val departurePoint: GeoPoint? = null,
 )
 
 @Immutable
@@ -490,6 +511,10 @@ data class RoadFeature(
   val osmTags: OsmTags,
   val curveAngleDeg: Double? = null,
   val curveRadiusMeters: Double? = null,
+  val curveEndDistanceMeters: Double? = null,
+  val curveDirection: RelativeDirection? = null,
+  val windingCurveCount: Int? = null,
+  val rangeEndDistanceMeters: Double? = null,
   val isBridge: Boolean = false,
   val isTunnel: Boolean = false,
   val isFootbridge: Boolean = false,
@@ -555,6 +580,17 @@ data class LandmarkAheadItem(
 )
 
 @Immutable
+data class TracedPathSegment(
+  val wayId: Long,
+  val name: String,
+  val highway: String,
+  val oneway: String?,
+  val startDistMeters: Double,
+  val endDistMeters: Double,
+  val forkReason: String? = null,
+)
+
+@Immutable
 data class AheadAnalysisResult(
   val features: List<RoadFeature>,
   val dividedRoad: DividedRoadInfo? = null,
@@ -563,6 +599,9 @@ data class AheadAnalysisResult(
   val loadedCorridorMeters: Double = 0.0,
   val hiddenMinorCount: Int = 0,
   val landmarksAhead: List<LandmarkAheadItem> = emptyList(),
+  val tracedPathSegments: List<TracedPathSegment> = emptyList(),
+  val horizonStoppedAtUnloadedBorder: Boolean = false,
+  val nearbyUnreachableLinks: List<String> = emptyList(),
 )
 
 enum class SearchScope {
@@ -923,6 +962,7 @@ data class PipelineDiagnostics(
   val horizonStatsSummary: String = "",
   val idCollisions: Int = 0,
   val danglingNodeRefs: Int = 0,
+  val borderStitchStats: BorderStitchStats = BorderStitchStats(),
 )
 
 enum class DebugEdgeCategory {

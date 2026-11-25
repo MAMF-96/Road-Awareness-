@@ -257,6 +257,7 @@ fun RoadAwarenessScreen(
       else -> windowSizeClass.heightSizeClass.toString()
     }
   val windowSizeClassSummary = "W:$widthClassName H:$heightClassName"
+  var hoistedPanelExpanded by rememberSaveable { mutableStateOf<Boolean?>(null) }
 
   RoadAwarenessScreenContent(
     uiState = uiState,
@@ -264,6 +265,8 @@ fun RoadAwarenessScreen(
     effectiveReduceTransparency = effectiveReduceTransparency,
     realGlassBlurActive = experimentalBlurRequested,
     snackbarHostState = snackbarHostState,
+    isPanelExpandedOverride = hoistedPanelExpanded,
+    onPanelExpandedChange = { hoistedPanelExpanded = it },
     onModeSelected = { viewModel.setTravelMode(it) },
     onSelectFeature = { viewModel.selectFeature(it) },
     onSelectOffRoadCandidate = { viewModel.selectOffRoadCandidate(it) },
@@ -361,6 +364,7 @@ fun RoadAwarenessScreen(
           uiState = uiState,
           useTextureMode = experimentalBlurRequested,
           isLandscape = landscapeFlag,
+          isPanelExpanded = hoistedPanelExpanded == true,
           cameraPaddingTopPx = topPadPx,
           cameraPaddingBottomPx = botPadPx,
           cameraPaddingLeftPx = leftPadPx,
@@ -469,6 +473,8 @@ fun RoadAwarenessScreenContent(
   onToggleOverview: () -> Unit = {},
   onToggleShowGraphEdges: (Boolean) -> Unit = {},
   onReportCopied: () -> Unit = {},
+  isPanelExpandedOverride: Boolean? = null,
+  onPanelExpandedChange: ((Boolean) -> Unit)? = null,
   mapContent: @Composable (
     modifier: Modifier,
     topPadPx: Float,
@@ -551,7 +557,13 @@ fun RoadAwarenessScreenContent(
       val safeLeftSidePx = with(density) { safeLeftDp.toPx() }
       val safeRightSidePx = with(density) { safeRightDp.toPx() }
 
-      var isPanelExpanded by rememberSaveable(isTablet) { mutableStateOf(isTablet) }
+      var internalPanelExpanded by rememberSaveable(isTablet) { mutableStateOf(isTablet) }
+      val isPanelExpanded = isPanelExpandedOverride ?: internalPanelExpanded
+      LaunchedEffect(isTablet) {
+        if (isPanelExpandedOverride == null) {
+          onPanelExpandedChange?.invoke(isTablet)
+        }
+      }
 
       var cardBottomPx by remember(isLandscape) { mutableFloatStateOf(0f) }
       var stripBottomPx by remember(isLandscape) { mutableFloatStateOf(0f) }
@@ -708,7 +720,10 @@ fun RoadAwarenessScreenContent(
                   isLandscape = true,
                   isTablet = isTablet,
                   isExpanded = isPanelExpanded,
-                  onToggleExpand = { isPanelExpanded = it },
+                  onToggleExpand = { expanded ->
+                    internalPanelExpanded = expanded
+                    onPanelExpandedChange?.invoke(expanded)
+                  },
                   onSelectFeature = onSelectFeature,
                   onSelectOffRoadCandidate = onSelectOffRoadCandidate,
                   onSelectOffRoadDirection = onSelectOffRoadDirection,
@@ -996,7 +1011,10 @@ fun RoadAwarenessScreenContent(
           isLandscape = false,
           isTablet = isTablet,
           isExpanded = isPanelExpanded,
-          onToggleExpand = { isPanelExpanded = it },
+          onToggleExpand = { expanded ->
+            internalPanelExpanded = expanded
+            onPanelExpandedChange?.invoke(expanded)
+          },
           onSelectFeature = onSelectFeature,
           onSelectOffRoadCandidate = onSelectOffRoadCandidate,
           onSelectOffRoadDirection = onSelectOffRoadDirection,

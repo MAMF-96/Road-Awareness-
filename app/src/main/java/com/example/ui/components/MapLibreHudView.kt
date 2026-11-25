@@ -35,6 +35,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.BuildConfig
 import com.example.config.AppConfig
 import com.example.data.model.DebugEdgeCategory
+import com.example.data.model.FeatureType
 import com.example.data.model.GeoPoint
 import com.example.data.model.LiveMapVectorFeature
 import com.example.data.model.SavedPin
@@ -138,6 +139,7 @@ fun MapLibreHudView(
   uiState: RoadHudUiState,
   useTextureMode: Boolean = false,
   isLandscape: Boolean = false,
+  isPanelExpanded: Boolean = false,
   cameraPaddingTopPx: Float,
   cameraPaddingBottomPx: Float,
   cameraPaddingLeftPx: Float,
@@ -159,6 +161,7 @@ fun MapLibreHudView(
     uiState = uiState,
     useTextureMode = useTextureMode,
     isLandscape = isLandscape,
+    isPanelExpanded = isPanelExpanded,
     cameraPaddingTopPx = cameraPaddingTopPx,
     cameraPaddingBottomPx = cameraPaddingBottomPx,
     cameraPaddingLeftPx = cameraPaddingLeftPx,
@@ -183,6 +186,7 @@ private fun MapLibreHudViewInternal(
   uiState: RoadHudUiState,
   useTextureMode: Boolean,
   isLandscape: Boolean,
+  isPanelExpanded: Boolean,
   cameraPaddingTopPx: Float,
   cameraPaddingBottomPx: Float,
   cameraPaddingLeftPx: Float,
@@ -547,6 +551,7 @@ private fun MapLibreHudViewInternal(
     uiState.features,
     uiState.landmarksAhead,
     uiState.isOverviewMode,
+    isPanelExpanded,
     uiState.selectedFeatureIndex,
     uiState.matchResult,
     uiState.offRoadState,
@@ -564,7 +569,7 @@ private fun MapLibreHudViewInternal(
     val map = mapInstance ?: return@LaunchedEffect
     val style = map.style ?: return@LaunchedEffect
     if (style !== loadedStyle || !style.isFullyLoaded) return@LaunchedEffect
-    syncHudLayers(context, style, uiState, isMapDark = isMapDark)
+    syncHudLayers(context, style, uiState, isMapDark = isMapDark, isPanelExpanded = isPanelExpanded)
     currentOnTileRoadHintChanged(null)
   }
 
@@ -999,7 +1004,7 @@ private fun setupHudLayers(style: Style) {
     style.addLayer(
       LineLayer(LYR_STUBS_CASING, SRC_STUBS).withProperties(
         PropertyFactory.lineColor(android.graphics.Color.WHITE),
-        PropertyFactory.lineWidth(9.0f),
+        PropertyFactory.lineWidth(Expression.coalesce(Expression.get("casingWidth"), Expression.literal(9.0f))),
         PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
         PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
         PropertyFactory.lineOpacity(1.0f),
@@ -1012,7 +1017,7 @@ private fun setupHudLayers(style: Style) {
     style.addLayer(
       LineLayer(LYR_STUBS, SRC_STUBS).withProperties(
         PropertyFactory.lineColor(Expression.get("color")),
-        PropertyFactory.lineWidth(5.0f),
+        PropertyFactory.lineWidth(Expression.coalesce(Expression.get("width"), Expression.literal(5.0f))),
         PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
         PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
         PropertyFactory.lineOpacity(0.92f),
@@ -1146,6 +1151,7 @@ private fun syncHudLayers(
   style: Style,
   uiState: RoadHudUiState,
   isMapDark: Boolean,
+  isPanelExpanded: Boolean = false,
 ) {
   if (!style.isFullyLoaded) return
   val lightVis = if (isMapDark) Property.NONE else Property.VISIBLE
@@ -1230,26 +1236,52 @@ private fun syncHudLayers(
     if (selected != null) {
       val colorInt = RoadColors.pinColorForIndex(selected.index).toArgb()
       val hexColor = String.format("#%06X", 0xFFFFFF and colorInt)
-      selected.branches.forEach { branch ->
-        if (branch.worldPoints.size >= 2) {
-          val line = LineString.fromLngLats(branch.worldPoints.map { Point.fromLngLat(it.lon, it.lat) })
+      val selType = selected.effectiveDisplayType()
+      val isCurveSel =
+        selType == FeatureType.SHARP_CURVE ||
+          selType == FeatureType.HAIRPIN ||
+          selType == FeatureType.WINDING_ROAD
+      if (isCurveSel) {
+        if (selected.outgoingMainWorldPoints.size >= 2) {
+          val line = LineString.fromLngLats(selected.outgoingMainWorldPoints.map { Point.fromLngLat(it.lon, it.lat) })
           val feat = Feature.fromGeometry(line)
           feat.addStringProperty("color", hexColor)
+          feat.addNumberProperty("width", 3.2f)
+          feat.addNumberProperty("casingWidth", 6.0f)
           stubFeatures += feat
         }
-      }
-      if (selected.branches.isNotEmpty()) {
-        val jf = Feature.fromGeometry(Point.fromLngLat(selected.anchor.lon, selected.anchor.lat))
-        jf.addStringProperty("color", hexColor)
-        junctionDotFeatures += jf
+      } else {
+        selected.branches.forEach { branch ->
+          if (branch.worldPoints.size >= 2) {
+            val line = LineString.fromLngLats(branch.worldPoints.map { Point.fromLngLat(it.lon, it.lat) })
+            val feat = Feature.fromGeometry(line)
+            feat.addStringProperty("color", hexColor)
+            stubFeatures += feat
+          }
+        }
+        if (selected.branches.isNotEmpty()) {
+          val jf = Feature.fromGeometry(Point.fromLngLat(selected.anchor.lon, selected.anchor.lat))
+          jf.addStringProperty("color", hexColor)
+          junctionDotFeatures += jf
+        }
       }
     }
 
     uiState.features.forEach { feat ->
       val colorInt = RoadColors.pinColorForIndex(feat.index).toArgb()
-      if (feat.index == selected?.index && feat.branches.isNotEmpty()) {
-        feat.branches.forEach { branch ->
-          val pinLoc = branch.worldPoints.lastOrNull() ?: feat.anchor
+      val fType = feat.effectiveDisplayType()
+      val isCurveFeat =
+        fType == FeatureType.SHARP_CURVE ||
+          fType == FeatureType.HAIRPIN ||
+          fType == FeatureType.WINDING_ROAD
+      if (!isCurveFeat && feat.index == selected?.index && feat.branches.isNotEmpty()) {
+        val sortedBranches = feat.branches.sortedBy { it.distanceMeters }
+        val limitPins = feat.isInterchangeGroup() && !uiState.isOverviewMode && !isPanelExpanded
+        val visibleBranches =
+          if (limitPins) sortedBranches.filter { it.distanceMeters <= 400.0 }.take(4)
+          else sortedBranches
+        visibleBranches.forEach { branch ->
+          val pinLoc = branch.departurePoint ?: branch.worldPoints.firstOrNull() ?: feat.anchor
           val iconId = "pin_${branch.badgeId}_${colorInt}_$themeKey"
           if (style.getImage(iconId) == null) {
             style.addImage(iconId, createPinBitmap(context, branch.badgeId, colorInt, isMapDark))
@@ -1258,6 +1290,20 @@ private fun syncHudLayers(
           f.addStringProperty("iconId", iconId)
           f.addNumberProperty("featureIndex", feat.index)
           pinFeatures += f
+        }
+        val overflowCount = sortedBranches.size - visibleBranches.size
+        if (limitPins && overflowCount > 0) {
+          val overflowLabel = "+$overflowCount"
+          val basePt = visibleBranches.lastOrNull()?.departurePoint ?: feat.anchor
+          val overflowPt = GeoMath.offsetPoint(basePt, uiState.location?.headingDeg ?: 0.0, 14.0)
+          val iconId = "pin_ovf_${overflowCount}_${colorInt}_$themeKey"
+          if (style.getImage(iconId) == null) {
+            style.addImage(iconId, createPinBitmap(context, overflowLabel, colorInt, isMapDark))
+          }
+          val of = Feature.fromGeometry(Point.fromLngLat(overflowPt.lon, overflowPt.lat))
+          of.addStringProperty("iconId", iconId)
+          of.addNumberProperty("featureIndex", feat.index)
+          pinFeatures += of
         }
       } else {
         val label = "${feat.index}"

@@ -6,6 +6,8 @@ import com.example.data.interfaces.MapDataSource
 import com.example.data.local.TileCacheDao
 import com.example.data.local.TileCacheEntity
 import com.example.data.model.BilingualName
+import com.example.data.model.BorderEndpointInfo
+import com.example.data.model.BorderStitchStats
 import com.example.data.model.DecodedTileArtifact
 import com.example.data.model.GeoPoint
 import com.example.data.model.GraphDataSource
@@ -1481,6 +1483,18 @@ class TileRoadGraphSource(
           }
         }
 
+      val stitchStats =
+        if (loadedTiles.isNotEmpty()) {
+          stitchCrossTileBordersAndComputeStats(
+            nodes = nodes,
+            ways = ways,
+            nodeToWays = nodeToWays,
+            loadedTiles = loadedTiles,
+          )
+        } else {
+          BorderStitchStats()
+        }
+
       return RoadGraph(
         nodes = nodes,
         ways = ways,
@@ -1489,6 +1503,7 @@ class TileRoadGraphSource(
         fromCache = fromCache,
         source = graphSource,
         loadedTiles = loadedTiles,
+        borderStitchStats = stitchStats,
       )
     }
 
@@ -1603,10 +1618,311 @@ class TileRoadGraphSource(
       }
     }
 
+    const val DECODER_VERSION = 3
     const val WAY_NS_TILES = 1
     const val WAY_NS_MAP = 2
     const val MAX_WAY_COUNTER = 1L shl 20
     const val MAX_TILE_ZOOM = 16
+
+    fun decodeTileKeyFromWayId(wayId: Long): String? {
+      if (wayId >= 0L) return null
+      val mag = -wayId
+      val ns = ((mag ushr 57) and 0x1FL).toInt()
+      if (ns != WAY_NS_TILES && ns != WAY_NS_MAP) return null
+      val z = ((mag ushr 52) and 0x1FL).toInt()
+      val x = ((mag ushr 36) and 0xFFFFL).toInt()
+      val y = ((mag ushr 20) and 0xFFFFL).toInt()
+      return "${z}_${x}_${y}"
+    }
+
+    private fun borderRoadPriority(highway: String?): Int =
+      when (highway?.lowercase(Locale.US)?.removeSuffix("_link")) {
+        "motorway" -> 8
+        "trunk" -> 7
+        "primary" -> 6
+        "secondary" -> 5
+        "tertiary" -> 4
+        "unclassified", "residential" -> 3
+        "service" -> 2
+        else -> 1
+      }
+
+    private fun isNearTileEdgeWithLoadedNeighbor(
+      pt: GeoPoint,
+      ownTileKey: String,
+      ownBounds: LoadedTileBounds?,
+      loadedByKey: Map<String, LoadedTileBounds>,
+      loadedTiles: List<LoadedTileBounds>,
+      maxMeters: Double = 2.5,
+    ): Boolean {
+      val cosLat = cos(Math.toRadians(pt.lat)).coerceAtLeast(0.15)
+      val mPerDegLat = 111_320.0
+      val mPerDegLon = 111_320.0 * cosLat
+      if (ownBounds != null) {
+        val nInt = 1 shl ownBounds.z
+        val dN = abs(ownBounds.north - pt.lat) * mPerDegLat
+        val dS = abs(pt.lat - ownBounds.south) * mPerDegLat
+        val dW = abs(GeoMath.unwrapLonDelta(pt.lon - ownBounds.west)) * mPerDegLon
+        val dE = abs(GeoMath.unwrapLonDelta(ownBounds.east - pt.lon)) * mPerDegLon
+        if (dN <= maxMeters && ownBounds.y > 0 && "${ownBounds.z}_${ownBounds.x}_${ownBounds.y - 1}" in loadedByKey) return true
+        if (dS <= maxMeters && ownBounds.y < nInt - 1 && "${ownBounds.z}_${ownBounds.x}_${ownBounds.y + 1}" in loadedByKey) return true
+        if (dW <= maxMeters && "${ownBounds.z}_${(ownBounds.x - 1 + nInt) % nInt}_${ownBounds.y}" in loadedByKey) return true
+        if (dE <= maxMeters && "${ownBounds.z}_${(ownBounds.x + 1) % nInt}_${ownBounds.y}" in loadedByKey) return true
+      }
+      for (other in loadedTiles) {
+        val otherKey = "${other.z}_${other.x}_${other.y}"
+        if (otherKey == ownTileKey) continue
+        val latMatch = pt.lat in (other.south - 0.0001)..(other.north + 0.0001)
+        val lonMatch =
+          GeoMath.unwrapLonDelta(pt.lon - other.west) >= -0.0001 &&
+            GeoMath.unwrapLonDelta(other.east - pt.lon) >= -0.0001
+        if (latMatch && lonMatch) {
+          val dN = abs(other.north - pt.lat) * mPerDegLat
+          val dS = abs(pt.lat - other.south) * mPerDegLat
+          val dW = abs(GeoMath.unwrapLonDelta(pt.lon - other.west)) * mPerDegLon
+          val dE = abs(GeoMath.unwrapLonDelta(other.east - pt.lon)) * mPerDegLon
+          if (minOf(dN, dS, dW, dE) <= maxMeters) return true
+        }
+      }
+      return false
+    }
+
+    /**
+     * Stitches road endpoints within 2.0 m across tile boundaries when class families are
+     * compatible and bearings differ < 35 deg (or either endpoint is a junction), then computes
+     * border connectivity diagnostics.
+     */
+    fun stitchCrossTileBordersAndComputeStats(
+      nodes: MutableMap<Long, OsmNode>,
+      ways: MutableMap<Long, OsmWay>,
+      nodeToWays: MutableMap<Long, MutableList<Long>>,
+      loadedTiles: List<LoadedTileBounds>,
+      wayTileKeyOverrides: Map<Long, String> = emptyMap(),
+    ): BorderStitchStats {
+      if (loadedTiles.isEmpty() || ways.isEmpty()) return BorderStitchStats()
+
+      val loadedByKey = HashMap<String, LoadedTileBounds>(loadedTiles.size)
+      for (b in loadedTiles) {
+        loadedByKey["${b.z}_${b.x}_${b.y}"] = b
+      }
+
+      val wayTileKey = HashMap<Long, String>(ways.size)
+      for ((wid, w) in ways) {
+        val explicit = wayTileKeyOverrides[wid] ?: decodeTileKeyFromWayId(wid)
+        if (explicit != null) {
+          wayTileKey[wid] = explicit
+        } else if (w.points.isNotEmpty()) {
+          val mid = w.points[w.points.size / 2]
+          val matched =
+            loadedTiles.firstOrNull { b ->
+              mid.lat in b.south..b.north &&
+                GeoMath.unwrapLonDelta(mid.lon - b.west) >= -1e-6 &&
+                GeoMath.unwrapLonDelta(b.east - mid.lon) >= -1e-6
+            }
+          if (matched != null) {
+            wayTileKey[wid] = "${matched.z}_${matched.x}_${matched.y}"
+          }
+        }
+      }
+
+      data class BorderCandidate(
+        val wayId: Long,
+        val isStart: Boolean,
+        var nodeId: Long,
+        val point: GeoPoint,
+        val tileKey: String,
+        val highway: String?,
+        val isJunction: Boolean,
+        val outwardBearingDeg: Double,
+      )
+
+      val candidates = ArrayList<BorderCandidate>()
+      for ((wid, w) in ways) {
+        if (w.nodeIds.size < 2 || w.points.size < 2) continue
+        val tKey = wayTileKey[wid] ?: continue
+        val ownBounds = loadedByKey[tKey]
+        val endpoints = listOf(true to 0, false to w.nodeIds.lastIndex)
+        for ((isStart, idx) in endpoints) {
+          val nid = w.nodeIds[idx]
+          val pt = w.points[idx]
+          if (!isNearTileEdgeWithLoadedNeighbor(pt, tKey, ownBounds, loadedByKey, loadedTiles, 2.5)) {
+            continue
+          }
+          val neighborPt = if (isStart) w.points[1] else w.points[w.points.lastIndex - 1]
+          val outwardBrng =
+            if (GeoMath.haversineMeters(pt, neighborPt) > 0.05) GeoMath.bearingDeg(pt, neighborPt)
+            else GeoMath.bearingDeg(w.points.first(), w.points.last())
+          val isJunc = (nodeToWays[nid]?.size ?: 0) >= 2 || w.tags.junction != null
+          candidates +=
+            BorderCandidate(
+              wayId = wid,
+              isStart = isStart,
+              nodeId = nid,
+              point = pt,
+              tileKey = tKey,
+              highway = w.tags.highway,
+              isJunction = isJunc,
+              outwardBearingDeg = outwardBrng,
+            )
+        }
+      }
+
+      if (candidates.size >= 2 && loadedTiles.size >= 2) {
+        // 2 m spatial hash grid
+        val grid = HashMap<Long, MutableList<Int>>(candidates.size * 2)
+        val cellMeters = 2.0
+        val latStep = cellMeters / 111_320.0
+        fun cellCoords(pt: GeoPoint): Pair<Int, Int> {
+          val cy = floor(pt.lat / latStep).toInt()
+          val cosLat = cos(Math.toRadians(pt.lat)).coerceAtLeast(0.15)
+          val lonStep = cellMeters / (111_320.0 * cosLat)
+          val cx = floor(GeoMath.normalizeLon(pt.lon) / lonStep).toInt()
+          return cy to cx
+        }
+        fun packCell(cy: Int, cx: Int): Long = (cy.toLong() shl 32) or (cx.toLong() and 0xFFFFFFFFL)
+
+        for ((idx, c) in candidates.withIndex()) {
+          val (cy, cx) = cellCoords(c.point)
+          grid.getOrPut(packCell(cy, cx)) { ArrayList(2) }.add(idx)
+        }
+
+        val parent = HashMap<Long, Long>()
+        fun findRoot(id: Long): Long {
+          var cur = id
+          while (true) {
+            val p = parent[cur] ?: return cur
+            if (p == cur) return cur
+            cur = p
+          }
+        }
+        fun unionNodes(a: Long, b: Long): Long {
+          val ra = findRoot(a)
+          val rb = findRoot(b)
+          if (ra == rb) return ra
+          val keep = minOf(ra, rb)
+          val drop = maxOf(ra, rb)
+          parent[drop] = keep
+          return keep
+        }
+
+        for (i in candidates.indices) {
+          val ca = candidates[i]
+          val (cy, cx) = cellCoords(ca.point)
+          var bestJ = -1
+          var bestDist = 2.0001
+          for (dy in -1..1) {
+            for (dx in -1..1) {
+              val bucket = grid[packCell(cy + dy, cx + dx)] ?: continue
+              for (j in bucket) {
+                if (j <= i) continue
+                val cb = candidates[j]
+                if (cb.tileKey == ca.tileKey) continue
+                val ra = findRoot(ca.nodeId)
+                val rb = findRoot(cb.nodeId)
+                if (ra == rb) continue
+                val d = GeoMath.haversineMeters(ca.point, cb.point)
+                if (d > 2.0) continue
+                val brngDiff = GeoMath.absAngleDiff(ca.outwardBearingDeg, (cb.outwardBearingDeg + 180.0) % 360.0)
+                val isJunc = ca.isJunction || cb.isJunction
+                val classOk = sameClassFamily(ca.highway, cb.highway)
+                if ((classOk && brngDiff < 35.0) || isJunc) {
+                  if (d < bestDist) {
+                    bestDist = d
+                    bestJ = j
+                  }
+                }
+              }
+            }
+          }
+          if (bestJ >= 0) {
+            val cb = candidates[bestJ]
+            unionNodes(ca.nodeId, cb.nodeId)
+          }
+        }
+
+        if (parent.isNotEmpty()) {
+          val mergedReplacements = HashMap<Long, Long>(parent.size)
+          for (k in parent.keys) {
+            val root = findRoot(k)
+            if (root != k) mergedReplacements[k] = root
+          }
+          if (mergedReplacements.isNotEmpty()) {
+            // Rewrite ways referencing replaced node IDs and update node map
+            val touchedWayIds = HashSet<Long>()
+            for (oldId in mergedReplacements.keys) {
+              nodeToWays[oldId]?.let { touchedWayIds.addAll(it) }
+            }
+            for (wid in touchedWayIds) {
+              val w = ways[wid] ?: continue
+              var changed = false
+              val newIds = ArrayList<Long>(w.nodeIds.size)
+              val newPts = ArrayList<GeoPoint>(w.points.size)
+              for (idx in w.nodeIds.indices) {
+                val origId = w.nodeIds[idx]
+                val finalId = mergedReplacements[origId] ?: origId
+                if (finalId != origId) changed = true
+                val pt =
+                  if (finalId != origId) (nodes[finalId]?.point ?: w.points[idx])
+                  else w.points[idx]
+                if (newIds.lastOrNull() != finalId) {
+                  newIds += finalId
+                  newPts += pt
+                }
+              }
+              if (changed && newPts.size >= 2) {
+                ways[wid] = w.copy(nodeIds = newIds, points = newPts)
+              }
+            }
+            for ((oldId, keepId) in mergedReplacements) {
+              val oldWays = nodeToWays.remove(oldId)
+              if (oldWays != null) {
+                val keepList = nodeToWays.getOrPut(keepId) { ArrayList(4) }
+                for (wid in oldWays) {
+                  if (wid in ways && wid !in keepList) keepList.add(wid)
+                }
+              }
+              nodes.remove(oldId)
+            }
+            for (c in candidates) {
+              c.nodeId = mergedReplacements[c.nodeId] ?: c.nodeId
+            }
+          }
+        }
+      }
+
+      var connected = 0
+      var unconnected = 0
+      val worstCandidates = ArrayList<Pair<Int, BorderEndpointInfo>>()
+      for (c in candidates) {
+        val touchingWays = nodeToWays[c.nodeId].orEmpty()
+        val distinctTiles = touchingWays.mapNotNull { wayTileKey[it] }.toHashSet()
+        if (distinctTiles.size >= 2) {
+          connected++
+        } else {
+          unconnected++
+          worstCandidates +=
+            borderRoadPriority(c.highway) to
+              BorderEndpointInfo(
+                lat = c.point.lat,
+                lon = c.point.lon,
+                roadClass = c.highway ?: "unknown",
+                tileKey = c.tileKey,
+              )
+        }
+      }
+      val worstTop5 =
+        worstCandidates
+          .sortedByDescending { it.first }
+          .take(5)
+          .map { it.second }
+
+      return BorderStitchStats(
+        totalBorderEndpoints = connected + unconnected,
+        connectedBorderEndpoints = connected,
+        unconnectedBorderEndpoints = unconnected,
+        worstUnconnected = worstTop5,
+      )
+    }
 
     fun encodeWayId(namespace: Int, z: Int, x: Int, y: Int, counter: Long): Long {
       require(namespace in 1..31) { "Namespace must be in 1..31 (got $namespace)" }

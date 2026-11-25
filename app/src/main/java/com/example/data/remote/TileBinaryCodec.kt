@@ -399,6 +399,6 @@ class TileBinaryCodec(
 
   companion object {
     private const val MAGIC = 0x52415431 // "RAT1"
-    private const val VERSION = 2
+    private const val VERSION = TileRoadGraphSource.DECODER_VERSION
   }
 }

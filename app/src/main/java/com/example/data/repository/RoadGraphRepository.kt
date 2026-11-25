@@ -1,6 +1,7 @@
 package com.example.data.repository
 
 import com.example.config.AppConfig
+import com.example.data.model.BorderStitchStats
 import com.example.data.model.DecodedTileArtifact
 import com.example.data.model.GeoPoint
 import com.example.data.model.GraphDataSource
@@ -11,6 +12,7 @@ import com.example.data.model.OsmWay
 import com.example.data.model.PoiItem
 import com.example.data.model.RoadGraph
 import com.example.data.model.TileNameLabelRecord
+import com.example.data.remote.TileRoadGraphSource
 import com.example.domain.GeoMath
 import com.example.domain.SpatialGraphIndex
 import kotlin.math.abs
@@ -54,6 +56,7 @@ class RoadGraphRepository(
     val mapFallbackUsed: Boolean = false,
     val mapFallbackWaysAdded: Int = 0,
     val hasPrimaryEdgeWithin150m: Boolean = false,
+    val borderStitchStats: BorderStitchStats = BorderStitchStats(),
   ) {
     fun oldestAgeUnderPoint(point: GeoPoint): Long? {
       val matching =
@@ -480,6 +483,19 @@ class RoadGraphRepository(
       }
     }
 
+    val borderStitchStats =
+      if (loadedTiles.isNotEmpty()) {
+        TileRoadGraphSource.stitchCrossTileBordersAndComputeStats(
+          nodes = mergedNodes,
+          ways = mergedWays,
+          nodeToWays = nodeToWays,
+          loadedTiles = loadedTiles,
+          wayTileKeyOverrides = wayOriginTileById,
+        )
+      } else {
+        BorderStitchStats()
+      }
+
     val waysPerTileMin = if (tileWayCounts.isEmpty()) 0 else tileWayCounts.min()
     val waysPerTileMax = if (tileWayCounts.isEmpty()) 0 else tileWayCounts.max()
     val waysPerTileAvg = if (tileWayCounts.isEmpty()) 0.0 else tileWayCounts.sum().toDouble() / tileWayCounts.size.toDouble()
@@ -638,6 +654,7 @@ class RoadGraphRepository(
         fromCache = allFromCache,
         source = source,
         loadedTiles = loadedTiles,
+        borderStitchStats = borderStitchStats,
       )
     versionCounter++
     val index = SpatialGraphIndex.build(combinedGraph, versionCounter, sourceLabel)
@@ -667,6 +684,7 @@ class RoadGraphRepository(
         mapFallbackUsed = usedFallback,
         mapFallbackWaysAdded = mapFallbackWaysAdded,
         hasPrimaryEdgeWithin150m = hasPrimaryEdgeWithin150m,
+        borderStitchStats = borderStitchStats,
       )
     _snapshot.value = snap
     return snap

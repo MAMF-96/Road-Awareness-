@@ -243,10 +243,12 @@ class MasterPassFeaturesTest {
   @Config(sdk = [36])
   fun check6_horizonThreeKmAndMinorJunctionFilterOnPrimaryCorridor() {
     val n0 = GeoPoint(30.0000, 31.0000)
-    val n1 = GeoMath.offsetPoint(n0, 0.0, 500.0)
+    val nNear = GeoMath.offsetPoint(n0, 0.0, 400.0)
+    val n1 = GeoMath.offsetPoint(n0, 0.0, 900.0)
     val n2 = GeoMath.offsetPoint(n0, 0.0, 1_500.0)
     val n3 = GeoMath.offsetPoint(n0, 0.0, 2_400.0)
     val n4 = GeoMath.offsetPoint(n0, 0.0, 3_200.0)
+    val nearMinorEnd = GeoMath.offsetPoint(nNear, 270.0, 120.0)
     val sideMinorEnd = GeoMath.offsetPoint(n1, 90.0, 120.0)
     val sideMajorEnd = GeoMath.offsetPoint(n2, 90.0, 200.0)
     val farMajorEnd = GeoMath.offsetPoint(n3, 270.0, 200.0)
@@ -255,7 +257,8 @@ class MasterPassFeaturesTest {
       buildGraph(
         ways =
           listOf(
-            OsmWay(1L, listOf(10L, 11L, 12L, 13L, 14L), listOf(n0, n1, n2, n3, n4), OsmTags(highway = "primary", nameEn = "Ring Axis")),
+            OsmWay(1L, listOf(10L, 15L, 11L, 12L, 13L, 14L), listOf(n0, nNear, n1, n2, n3, n4), OsmTags(highway = "primary", nameEn = "Ring Axis")),
+            OsmWay(5L, listOf(15L, 25L), listOf(nNear, nearMinorEnd), OsmTags(highway = "residential")),
             OsmWay(2L, listOf(11L, 21L), listOf(n1, sideMinorEnd), OsmTags(highway = "residential")),
             OsmWay(3L, listOf(12L, 22L), listOf(n2, sideMajorEnd), OsmTags(highway = "secondary", nameEn = "Midway Blvd")),
             OsmWay(4L, listOf(13L, 23L), listOf(n3, farMajorEnd), OsmTags(highway = "primary", nameEn = "North Loop")),
@@ -264,7 +267,8 @@ class MasterPassFeaturesTest {
 
     val matched = MapMatcher.match(graph, GeoMath.offsetPoint(n0, 0.0, 50.0), 0.0, TravelMode.DRIVING, null).primary!!
     val hiddenMinorRes = AheadGraphAnalyzer.analyzeAheadDetailed(graph, matched, TravelMode.DRIVING, 22.0, configuredHorizonMeters = 3_000.0, showMinorJunctions = false)
-    assertTrue("Expected minor residential branch to be hidden by default on primary corridor", hiddenMinorRes.hiddenMinorCount >= 1)
+    assertTrue("Expected minor residential branch within first 600m to remain visible", hiddenMinorRes.features.any { f -> f.branches.any { it.wayId == 5L } })
+    assertTrue("Expected minor residential branch beyond 600m to be hidden by default on primary corridor", hiddenMinorRes.hiddenMinorCount >= 1)
     assertTrue("Expected timeline entries out past 2 km", hiddenMinorRes.timelineEntries.any { it.distanceMeters >= 2_000.0 })
     assertFalse(hiddenMinorRes.features.any { f -> f.branches.any { it.wayId == 2L } })
 

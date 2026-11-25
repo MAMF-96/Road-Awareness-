@@ -96,12 +96,15 @@ object MvtDecoder {
     )
   }
 
-  fun tilePxToGeoPoint(z: Int, x: Int, y: Int, px: Int, py: Int, extent: Int): GeoPoint {
+  fun tilePxToGeoPoint(z: Int, x: Int, y: Int, px: Int, py: Int, extent: Int): GeoPoint =
+    tilePxToGeoPoint(z, x, y, px.toDouble(), py.toDouble(), extent)
+
+  fun tilePxToGeoPoint(z: Int, x: Int, y: Int, px: Double, py: Double, extent: Int): GeoPoint {
     val nInt = 1 shl z
     val wrappedX = ((x % nInt) + nInt) % nInt
     val n = 2.0.pow(z)
-    val xf = wrappedX.toDouble() + px.toDouble() / extent.toDouble()
-    val yf = y.toDouble() + py.toDouble() / extent.toDouble()
+    val xf = wrappedX.toDouble() + px / extent.toDouble()
+    val yf = y.toDouble() + py / extent.toDouble()
     val lon = GeoMath.normalizeLon((xf / n) * 360.0 - 180.0)
     val latRad = atan(sinh(PI * (1.0 - 2.0 * yf / n)))
     return GeoPoint(lat = GeoMath.clampMercatorLat(Math.toDegrees(latRad)), lon = lon)
@@ -253,6 +256,8 @@ object MvtDecoder {
     return MvtFeature(id = id, geomType = geomType, tags = tagMap, geometries = geometries)
   }
 
+  private data class PxPoint(val x: Double, val y: Double)
+
   private fun decodeGeometryCommands(
     commands: List<Int>,
     geomType: GeomType,
@@ -262,8 +267,8 @@ object MvtDecoder {
     extent: Int,
   ): List<List<GeoPoint>> {
     if (commands.isEmpty()) return emptyList()
-    val result = mutableListOf<List<GeoPoint>>()
-    var currentRing = mutableListOf<GeoPoint>()
+    val rawRings = mutableListOf<List<PxPoint>>()
+    var currentRing = mutableListOf<PxPoint>()
     var cursorX = 0
     var cursorY = 0
     var idx = 0
@@ -281,10 +286,10 @@ object MvtDecoder {
             cursorX += dx
             cursorY += dy
             if (currentRing.isNotEmpty()) {
-              result += currentRing
+              rawRings += currentRing
               currentRing = mutableListOf()
             }
-            currentRing += tilePxToGeoPoint(z, x, y, cursorX, cursorY, extent)
+            currentRing += PxPoint(cursorX.toDouble(), cursorY.toDouble())
           }
         }
         CMD_LINE_TO -> {
@@ -294,13 +299,13 @@ object MvtDecoder {
             val dy = zigzag32(commands[idx++])
             cursorX += dx
             cursorY += dy
-            currentRing += tilePxToGeoPoint(z, x, y, cursorX, cursorY, extent)
+            currentRing += PxPoint(cursorX.toDouble(), cursorY.toDouble())
           }
         }
         CMD_CLOSE_PATH -> {
           if (geomType == GeomType.POLYGON && currentRing.isNotEmpty()) {
             currentRing += currentRing.first()
-            result += currentRing
+            rawRings += currentRing
             currentRing = mutableListOf()
           }
         }
@@ -308,9 +313,115 @@ object MvtDecoder {
       }
     }
     if (currentRing.isNotEmpty()) {
-      result += currentRing
+      rawRings += currentRing
     }
-    return result
+
+    val ext = extent.toDouble()
+    return if (geomType == GeomType.LINESTRING) {
+      val clipped = mutableListOf<List<GeoPoint>>()
+      for (line in rawRings) {
+        for (piece in clipPolylineToTileBounds(line, ext)) {
+          if (piece.size >= 2) {
+            clipped += piece.map { p -> tilePxToGeoPoint(z, x, y, p.x, p.y, extent) }
+          }
+        }
+      }
+      clipped
+    } else {
+      rawRings.map { ring ->
+        ring.map { p -> tilePxToGeoPoint(z, x, y, p.x, p.y, extent) }
+      }
+    }
+  }
+
+  private fun clipPolylineToTileBounds(
+    pts: List<PxPoint>,
+    extent: Double,
+  ): List<List<PxPoint>> {
+    if (pts.size < 2) return emptyList()
+    val out = mutableListOf<List<PxPoint>>()
+    var current = mutableListOf<PxPoint>()
+    val eps = 1e-6
+
+    fun flushCurrent() {
+      if (current.size >= 2) {
+        out += current
+      }
+      current = mutableListOf()
+    }
+
+    fun samePx(a: PxPoint, b: PxPoint): Boolean =
+      kotlin.math.abs(a.x - b.x) <= 1e-4 && kotlin.math.abs(a.y - b.y) <= 1e-4
+
+    for (i in 0 until pts.lastIndex) {
+      val p0 = pts[i]
+      val p1 = pts[i + 1]
+      val clippedSeg = clipSegmentLiangBarsky(p0, p1, 0.0, extent, 0.0, extent)
+      if (clippedSeg == null) {
+        flushCurrent()
+        continue
+      }
+      val (c0, c1) = clippedSeg
+      if (kotlin.math.abs(c0.x - c1.x) <= eps && kotlin.math.abs(c0.y - c1.y) <= eps) {
+        continue
+      }
+      if (current.isEmpty()) {
+        current += c0
+        current += c1
+      } else if (samePx(current.last(), c0)) {
+        current += c1
+      } else {
+        flushCurrent()
+        current += c0
+        current += c1
+      }
+      // If segment exited the tile at c1 before reaching p1, close this piece cleanly.
+      if (!samePx(c1, p1)) {
+        flushCurrent()
+      }
+    }
+    flushCurrent()
+    return out
+  }
+
+  private fun clipSegmentLiangBarsky(
+    p0: PxPoint,
+    p1: PxPoint,
+    xMin: Double,
+    xMax: Double,
+    yMin: Double,
+    yMax: Double,
+  ): Pair<PxPoint, PxPoint>? {
+    val dx = p1.x - p0.x
+    val dy = p1.y - p0.y
+    var t0 = 0.0
+    var t1 = 1.0
+
+    fun clipTest(p: Double, q: Double): Boolean {
+      if (kotlin.math.abs(p) < 1e-12) {
+        return q >= 0.0
+      }
+      val r = q / p
+      if (p < 0.0) {
+        if (r > t1) return false
+        if (r > t0) t0 = r
+      } else {
+        if (r < t0) return false
+        if (r < t1) t1 = r
+      }
+      return true
+    }
+
+    if (!clipTest(-dx, p0.x - xMin)) return null
+    if (!clipTest(dx, xMax - p0.x)) return null
+    if (!clipTest(-dy, p0.y - yMin)) return null
+    if (!clipTest(dy, yMax - p0.y)) return null
+
+    val cx0 = (p0.x + t0 * dx).coerceIn(xMin, xMax)
+    val cy0 = (p0.y + t0 * dy).coerceIn(yMin, yMax)
+    val cx1 = (p0.x + t1 * dx).coerceIn(xMin, xMax)
+    val cy1 = (p0.y + t1 * dy).coerceIn(yMin, yMax)
+    return PxPoint(cx0, cy0) to PxPoint(cx1, cy1)
   }
 
   private fun zigzag32(n: Int): Int = (n ushr 1) xor -(n and 1)

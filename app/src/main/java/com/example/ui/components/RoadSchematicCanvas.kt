@@ -30,8 +30,12 @@ import com.example.data.model.TravelMode
 import com.example.ui.theme.LocalRoadColors
 import com.example.ui.theme.RoadColors
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
 
 /**
  * Heading-up geometric schematic built strictly from the real connected OSM road geometry
@@ -74,12 +78,33 @@ fun RoadSchematicCanvas(
         return@Canvas
       }
 
+      val displayType = feature.effectiveDisplayType()
+      val isCurveFeature =
+        displayType == FeatureType.SHARP_CURVE ||
+          displayType == FeatureType.HAIRPIN ||
+          displayType == FeatureType.WINDING_ROAD
+      val schematicBranches =
+        when {
+          isCurveFeature -> emptyList()
+          feature.isInterchangeGroup() ->
+            feature.branches.filter { (it.distanceMeters - feature.distanceMeters) <= 250.0 }
+          else -> feature.branches
+        }
+      val outgoingForScale =
+        if (feature.isInterchangeGroup()) {
+          feature.outgoingMainLocalPoints.filter { it.yMeters <= 250.0 }.ifEmpty { feature.outgoingMainLocalPoints.take(2) }
+        } else {
+          feature.outgoingMainLocalPoints
+        }
+
       // Compute uniform isotropic scale tightly fitted to geometry bounding box
       val allPts = buildList {
         addAll(feature.incomingLocalPoints)
-        addAll(feature.outgoingMainLocalPoints)
-        addAll(feature.crossingLocalPoints)
-        feature.branches.forEach { addAll(it.localPoints) }
+        addAll(outgoingForScale)
+        if (!isCurveFeature) {
+          addAll(feature.crossingLocalPoints)
+          schematicBranches.forEach { addAll(it.localPoints) }
+        }
       }
 
       val minX = (allPts.minOfOrNull { it.xMeters } ?: -18.0).coerceAtMost(-12.0)
@@ -106,7 +131,6 @@ fun RoadSchematicCanvas(
         )
       }
 
-      val displayType = feature.effectiveDisplayType()
       val anchorOffset = toCanvas(LocalPoint(0.0, 0.0))
       val isFootwayStyle =
         travelMode == TravelMode.WALKING &&
@@ -205,14 +229,15 @@ fun RoadSchematicCanvas(
         )
       }
 
-      feature.branches.forEach { branch ->
+      schematicBranches.forEach { branch ->
         if (branch.localPoints.size >= 2) {
           drawPolyline(branch.localPoints.map(::toCanvas), roadColors.schematicRoadCasing, casingWidth * 0.92f)
         }
       }
 
       val drawOutgoingMain =
-        (feature.branches.isEmpty() ||
+        (isCurveFeature ||
+          schematicBranches.isEmpty() ||
           displayType == FeatureType.OVERPASS_ABOVE ||
           displayType == FeatureType.UNDERPASS_BELOW ||
           displayType == FeatureType.TOLL_PLAZA ||
@@ -222,9 +247,9 @@ fun RoadSchematicCanvas(
           displayType == FeatureType.MEDIAN_OPENING ||
           displayType == FeatureType.FRONTAGE_ROAD ||
           feature.isInterchangeGroup()) &&
-          feature.outgoingMainLocalPoints.size >= 2
+          outgoingForScale.size >= 2
       if (drawOutgoingMain) {
-        drawPolyline(feature.outgoingMainLocalPoints.map(::toCanvas), roadColors.schematicRoadCasing, casingWidth)
+        drawPolyline(outgoingForScale.map(::toCanvas), roadColors.schematicRoadCasing, casingWidth)
       }
 
       // 2) Draw thick road fills
@@ -240,14 +265,14 @@ fun RoadSchematicCanvas(
         )
       }
 
-      feature.branches.forEach { branch ->
+      schematicBranches.forEach { branch ->
         if (branch.localPoints.size >= 2) {
           drawPolyline(branch.localPoints.map(::toCanvas), roadColors.schematicRoadFill, roadWidth * 0.90f)
         }
       }
 
       if (drawOutgoingMain) {
-        drawPolyline(feature.outgoingMainLocalPoints.map(::toCanvas), roadColors.schematicRoadFill, roadWidth)
+        drawPolyline(outgoingForScale.map(::toCanvas), roadColors.schematicRoadFill, roadWidth)
       }
 
       // Centerline dashes on incoming + outgoing main
@@ -255,7 +280,7 @@ fun RoadSchematicCanvas(
         drawPolyline(incomingCanvasPts, Color.White.copy(alpha = 0.85f), 2.dp.toPx(), dashEffect)
       }
       if (drawOutgoingMain) {
-        drawPolyline(feature.outgoingMainLocalPoints.map(::toCanvas), Color.White.copy(alpha = 0.85f), 2.dp.toPx(), dashEffect)
+        drawPolyline(outgoingForScale.map(::toCanvas), Color.White.copy(alpha = 0.85f), 2.dp.toPx(), dashEffect)
       }
 
       // 3) Per-FeatureType schematic templates
@@ -510,6 +535,75 @@ fun RoadSchematicCanvas(
           }
         }
 
+        FeatureType.SHARP_CURVE, FeatureType.HAIRPIN, FeatureType.WINDING_ROAD -> {
+          val curvePts = outgoingForScale.map(::toCanvas)
+          if (curvePts.size >= 2) {
+            drawPolyline(curvePts, pinColor, 4.dp.toPx())
+            val pPrev = curvePts[curvePts.size - 2]
+            val pTip = curvePts.last()
+            val angle = atan2((pTip.y - pPrev.y).toDouble(), (pTip.x - pPrev.x).toDouble())
+            val arrowLen = 9.dp.toPx()
+            val wing = 0.55
+            val leftPt = Offset(
+              pTip.x - arrowLen * cos(angle - wing).toFloat(),
+              pTip.y - arrowLen * sin(angle - wing).toFloat(),
+            )
+            val rightPt = Offset(
+              pTip.x - arrowLen * cos(angle + wing).toFloat(),
+              pTip.y - arrowLen * sin(angle + wing).toFloat(),
+            )
+            val arrowPath = Path().apply {
+              moveTo(pTip.x, pTip.y)
+              lineTo(leftPt.x, leftPt.y)
+              lineTo(rightPt.x, rightPt.y)
+              close()
+            }
+            drawPath(arrowPath, color = pinColor)
+          }
+          val curveLabel =
+            when {
+              displayType == FeatureType.WINDING_ROAD && feature.windingCurveCount != null ->
+                "Winding · ${feature.windingCurveCount} curves"
+              feature.curveAngleDeg != null && feature.curveRadiusMeters != null -> {
+                val dirWord =
+                  when (feature.curveDirection) {
+                    RelativeDirection.LEFT -> "Left"
+                    RelativeDirection.RIGHT -> "Right"
+                    else -> "Curve"
+                  }
+                "$dirWord ${feature.curveAngleDeg.toInt()}° · R ${feature.curveRadiusMeters.toInt()} m"
+              }
+              else -> null
+            }
+          if (curveLabel != null) {
+            drawContext.canvas.nativeCanvas.apply {
+              val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = android.graphics.Color.WHITE
+                textAlign = Paint.Align.CENTER
+                textSize = 9.5.dp.toPx()
+                typeface = Typeface.DEFAULT_BOLD
+              }
+              val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = android.graphics.Color.argb(185, 15, 23, 42)
+              }
+              val tw = textPaint.measureText(curveLabel)
+              val padH = 6.dp.toPx()
+              val cx = size.width * 0.5f
+              val cy = 14.dp.toPx()
+              drawRoundRect(
+                cx - tw * 0.5f - padH,
+                cy - 9.dp.toPx(),
+                cx + tw * 0.5f + padH,
+                cy + 5.dp.toPx(),
+                7.dp.toPx(),
+                7.dp.toPx(),
+                bgPaint,
+              )
+              drawText(curveLabel, cx, cy, textPaint)
+            }
+          }
+        }
+
         else -> Unit
       }
 
@@ -555,7 +649,10 @@ fun RoadSchematicCanvas(
         )
       }
 
-      feature.branches.forEach { branch ->
+      val placedBadgeCenters = mutableListOf<Offset>()
+      val minBadgeDistPx = 18.dp.toPx()
+      val badgeMargin = 14.dp.toPx()
+      schematicBranches.forEach { branch ->
         if (branch.localPoints.size >= 2) {
           val pts = branch.localPoints.map(::toCanvas)
           drawPolyline(pts, Color.White.copy(alpha = 0.8f), 1.8.dp.toPx(), dashEffect)
@@ -568,16 +665,28 @@ fun RoadSchematicCanvas(
           drawPolyline(pts.take(2), accent, 3.8.dp.toPx())
 
           val tip = pts.last()
-          val clampedTip =
+          var badgePos =
             Offset(
-              x = tip.x.coerceIn(14.dp.toPx(), size.width - 14.dp.toPx()),
-              y = tip.y.coerceIn(14.dp.toPx(), size.height - 14.dp.toPx()),
+              x = tip.x.coerceIn(badgeMargin, size.width - badgeMargin),
+              y = tip.y.coerceIn(badgeMargin, size.height - badgeMargin),
             )
-          drawBadge(clampedTip, branch.badgeId, accent)
+          var attempts = 0
+          while (attempts < 8 && placedBadgeCenters.any { hypot(it.x - badgePos.x, it.y - badgePos.y) < minBadgeDistPx }) {
+            val stepAngle = attempts * 0.85
+            val stepR = minBadgeDistPx * (1f + attempts / 4)
+            badgePos =
+              Offset(
+                x = (badgePos.x + stepR * cos(stepAngle).toFloat()).coerceIn(badgeMargin, size.width - badgeMargin),
+                y = (badgePos.y + stepR * sin(stepAngle).toFloat()).coerceIn(badgeMargin, size.height - badgeMargin),
+              )
+            attempts++
+          }
+          placedBadgeCenters += badgePos
+          drawBadge(badgePos, branch.badgeId, accent)
         }
       }
 
-      if (feature.branches.isEmpty()) {
+      if (schematicBranches.isEmpty()) {
         drawBadge(
           Offset(anchorOffset.x, anchorOffset.y.coerceIn(16.dp.toPx(), size.height - 20.dp.toPx())),
           "${feature.index}",

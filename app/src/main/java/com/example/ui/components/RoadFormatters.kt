@@ -377,6 +377,8 @@ fun featureTypeTitle(type: FeatureType): String =
     FeatureType.CUL_DE_SAC -> stringResource(R.string.feature_cul_de_sac)
     FeatureType.SERVICE_ROAD -> stringResource(R.string.feature_service_road)
     FeatureType.SHARP_CURVE -> stringResource(R.string.feature_sharp_curve)
+    FeatureType.HAIRPIN -> stringResource(R.string.feature_hairpin)
+    FeatureType.WINDING_ROAD -> stringResource(R.string.feature_winding_road)
     FeatureType.FOOTPATH -> stringResource(R.string.feature_footpath)
     FeatureType.CROSSWALK -> stringResource(R.string.feature_crosswalk)
     FeatureType.FOOTBRIDGE -> stringResource(R.string.feature_footbridge)

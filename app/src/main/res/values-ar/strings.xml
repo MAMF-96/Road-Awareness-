@@ -45,12 +45,13 @@
     <string name="branch_blocked_reason">اتجاه واحد معاكس</string>
     <string name="branch_unverified">غير متحقق</string>
     <string name="unknown_value">غير معروف</string>
-    <string name="unnamed_branch">فرع بلا اسم</string>
+    <string name="unnamed_branch">شارع بلا اسم معروف</string>
     <string name="leads_to_format">يؤدي إلى %1$s</string>
     <string name="leads_to_unknown">غير معروف</string>
     <string name="dir_left">يسار</string>
     <string name="dir_right">يمين</string>
     <string name="dir_ahead">أمام</string>
+    <string name="dir_across_median_format">%1$s (عبر الجزيرة الوسطى)</string>
     <string name="more_branches_format">+%1$d</string>
     <string name="upcoming_features_title">المعالم القادمة</string>
     <string name="parallel_candidates_format">%1$s / %2$s</string>
@@ -75,6 +76,8 @@
     <string name="feature_cul_de_sac">نهاية دائرية</string>
     <string name="feature_service_road">طريق خدمة</string>
     <string name="feature_sharp_curve">منعطف حاد</string>
+    <string name="feature_hairpin">منعطف دبوسي حاد</string>
+    <string name="feature_winding_road">طريق متعرج</string>
     <string name="feature_footpath">ممر مشاة</string>
     <string name="feature_crosswalk">معبر مشاة</string>
     <string name="feature_footbridge">جسر مشاة</string>
@@ -102,6 +105,8 @@
     <string name="median_opening_subtitle">فتحة دوران بالجزيرة</string>
     <string name="frontage_road_left">طريق خدمة / موازٍ (يسار)</string>
     <string name="frontage_road_right">طريق خدمة / موازٍ (يمين)</string>
+    <string name="curve_arc_label_format">%1$s %2$d° · R %3$d م</string>
+    <string name="winding_road_subtitle_format">%1$d منعطفات · الأشد %2$d°</string>
     <string name="inspector_feature_census">إحصاء المعالم (1.5 كم)</string>
     <string name="inspector_census_empty">لا معالم ضمن 1.5 كم</string>
     <string name="inspector_jump">انتقال</string>
