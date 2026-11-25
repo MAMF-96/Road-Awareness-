@@ -142,10 +142,13 @@
 
     <!-- Settings & Graph Inspector -->
     <string name="settings_title">الإعدادات</string>
-    <string name="settings_theme">المظهر</string>
+    <string name="settings_theme">نمط الخريطة</string>
     <string name="theme_auto">تلقائي</string>
-    <string name="theme_light">نهاري</string>
-    <string name="theme_dark">ليلي</string>
+    <string name="theme_light">فاتح</string>
+    <string name="theme_dark">داكن</string>
+    <string name="settings_panel_style">نمط اللوحة</string>
+    <string name="panel_style_always_dark">داكن دائماً</string>
+    <string name="panel_style_follow_map">يتبع الخريطة</string>
     <string name="settings_units">الوحدات</string>
     <string name="units_auto">تلقائي</string>
     <string name="units_metric">متري</string>

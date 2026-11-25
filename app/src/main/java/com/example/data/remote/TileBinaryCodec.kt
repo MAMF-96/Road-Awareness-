@@ -337,8 +337,8 @@ class TileBinaryCodec(
     }
   }
 
-  private fun fileFor(tileKey: String, mode: TravelMode): File =
-    File(cacheDir, "${tileKey}_${mode.name}.bin")
+  private fun fileFor(tileKey: String, @Suppress("UNUSED_PARAMETER") mode: TravelMode): File =
+    File(cacheDir, "${tileKey}.bin")
 
   private fun writeNullableString(dos: DataOutputStream, s: String?) {
     if (s == null) {
@@ -399,6 +399,6 @@ class TileBinaryCodec(
 
   companion object {
     private const val MAGIC = 0x52415431 // "RAT1"
-    private const val VERSION = 1
+    private const val VERSION = 2
   }
 }

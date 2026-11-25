@@ -29,7 +29,8 @@ import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
 
 data class GlassRenderConfig(
-  val isDark: Boolean = false,
+  val isDark: Boolean = true,
+  val isMapDark: Boolean = true,
   val reduceTransparency: Boolean = false,
   val useRealBlur: Boolean = false,
   val hazeState: HazeState? = null,
@@ -73,6 +74,16 @@ object GlassTokens {
   val DarkSolidInner = Color(0xFF1C2533)
   val DarkSolidBorder = Color(0xFF334155)
 
+  // Dark translucent gradients over light map (>= 88% opacity for crisp readability)
+  val DarkOverLightFillTop = Color(0xE8121821) // 91%
+  val DarkOverLightFillBottom = Color(0xE30E141C) // 89%
+  val DarkOverLightCardFillTop = Color(0xEB121821) // 92%
+  val DarkOverLightCardFillBottom = Color(0xE30E141C) // 89%
+  val DarkOverLightInnerFillTop = Color(0xC71E2736) // 78%
+  val DarkOverLightInnerFillBottom = Color(0xB8161E2B) // 72%
+  val DarkOverLightSoftShadowColor = Color(0x3D000000) // ~24% black
+  val DarkOverLightTightShadowColor = Color(0x24000000) // ~14% black
+
   val SoftShadowColor = Color(0x24000000) // ~14% black
   val TightShadowColor = Color(0x1A000000) // ~10% black
 }
@@ -113,6 +124,15 @@ fun GlassSurface(
             if (isLighterInner) GlassTokens.LightSolidInner else GlassTokens.LightSolidSurface
           }
         Brush.verticalGradient(listOf(solid, solid))
+      }
+      isDark && !config.isMapDark -> {
+        val (top, bot) =
+          when {
+            isLighterInner -> GlassTokens.DarkOverLightInnerFillTop to GlassTokens.DarkOverLightInnerFillBottom
+            highOpacity -> GlassTokens.DarkOverLightCardFillTop to GlassTokens.DarkOverLightCardFillBottom
+            else -> GlassTokens.DarkOverLightFillTop to GlassTokens.DarkOverLightFillBottom
+          }
+        Brush.verticalGradient(listOf(top, bot))
       }
       isDark -> {
         val (top, bot) =
@@ -166,8 +186,11 @@ fun GlassSurface(
             tint =
               HazeTint(
                 color =
-                  if (isDark) Color(0xFF121821).copy(alpha = if (highOpacity) 0.56f else 0.42f)
-                  else Color.White.copy(alpha = if (highOpacity) 0.72f else 0.58f),
+                  when {
+                    isDark && !config.isMapDark -> Color(0xFF121821).copy(alpha = if (highOpacity) 0.72f else 0.64f)
+                    isDark -> Color(0xFF121821).copy(alpha = if (highOpacity) 0.56f else 0.42f)
+                    else -> Color.White.copy(alpha = if (highOpacity) 0.72f else 0.58f)
+                  },
               ),
             blurRadius = 22.dp,
             noiseFactor = 0.04f,
@@ -180,18 +203,22 @@ fun GlassSurface(
   val shadowMod =
     if (withShadow) {
       if (isDark) {
+        val softShadow =
+          if (!config.isMapDark) GlassTokens.DarkOverLightSoftShadowColor else GlassTokens.SoftShadowColor
+        val tightShadow =
+          if (!config.isMapDark) GlassTokens.DarkOverLightTightShadowColor else GlassTokens.TightShadowColor
         Modifier
           .shadow(
-            elevation = 16.dp,
+            elevation = if (!config.isMapDark) 18.dp else 16.dp,
             shape = shape,
-            ambientColor = GlassTokens.SoftShadowColor,
-            spotColor = GlassTokens.SoftShadowColor,
+            ambientColor = softShadow,
+            spotColor = softShadow,
           )
           .shadow(
-            elevation = 2.dp,
+            elevation = if (!config.isMapDark) 3.dp else 2.dp,
             shape = shape,
-            ambientColor = GlassTokens.TightShadowColor,
-            spotColor = GlassTokens.TightShadowColor,
+            ambientColor = tightShadow,
+            spotColor = tightShadow,
           )
       } else {
         Modifier

@@ -46,6 +46,14 @@ class RoadGraphRepository(
     val labelsByTile: Map<String, List<TileNameLabelRecord>> = emptyMap(),
     val overpassEdgeCount: Int = 0,
     val tileEdgeCount: Int = 0,
+    val idCollisions: Int = 0,
+    val danglingNodeRefs: Int = 0,
+    val waysPerTileMin: Int = 0,
+    val waysPerTileAvg: Double = 0.0,
+    val waysPerTileMax: Int = 0,
+    val mapFallbackUsed: Boolean = false,
+    val mapFallbackWaysAdded: Int = 0,
+    val hasPrimaryEdgeWithin150m: Boolean = false,
   ) {
     fun oldestAgeUnderPoint(point: GeoPoint): Long? {
       val matching =
@@ -106,6 +114,8 @@ class RoadGraphRepository(
   private var mapFallbackGraph: RoadGraph? = null
   private var currentKeepTiles: Set<String> = emptySet()
   private var currentKeepCenter: GeoPoint? = null
+  private var currentFallbackEvalCenter: GeoPoint? = null
+  private var lastFallbackEvalPublishedCenter: GeoPoint? = null
   private var currentKeepHorizonMeters: Double = 3000.0
   private var versionCounter: Long = 0L
   private var memoryHits: Long = 0L
@@ -163,6 +173,7 @@ class RoadGraphRepository(
   ): GraphSnapshot =
     synchronized(lock) {
       currentKeepCenter = center
+      currentFallbackEvalCenter = center
       currentKeepHorizonMeters = horizonMeters
       currentKeepTiles = keepTileKeys
       val evictedAny = evictBeyondWindowAndCapsLocked()
@@ -280,10 +291,37 @@ class RoadGraphRepository(
       rebuildAndPublishLocked()
     }
 
-  fun setMapFallbackGraph(graph: RoadGraph?): GraphSnapshot =
+  fun setMapFallbackGraph(
+    graph: RoadGraph?,
+    evalCenter: GeoPoint? = null,
+  ): GraphSnapshot =
     synchronized(lock) {
       mapFallbackGraph = graph
+      if (evalCenter != null) {
+        currentFallbackEvalCenter = evalCenter
+      }
       rebuildAndPublishLocked()
+    }
+
+  fun reevaluateFallbackForPosition(
+    center: GeoPoint,
+    minMoveMeters: Double = 50.0,
+  ): GraphSnapshot? =
+    synchronized(lock) {
+      currentFallbackEvalCenter = center
+      val fallback = mapFallbackGraph ?: return@synchronized null
+      if (fallback.ways.isEmpty()) return@synchronized null
+      val lastEval = lastFallbackEvalPublishedCenter
+      val moved = lastEval?.let { GeoMath.haversineMeters(it, center) } ?: Double.MAX_VALUE
+      if (moved < minMoveMeters) return@synchronized null
+      val curSnap = _snapshot.value
+      val primaryNear =
+        hasPrimaryWayWithin150mLocked(center)
+      if (!primaryNear || curSnap.mapFallbackUsed) {
+        rebuildAndPublishLocked()
+      } else {
+        null
+      }
     }
 
   fun clear(): GraphSnapshot =
@@ -292,6 +330,9 @@ class RoadGraphRepository(
       overpassEntries.clear()
       mapFallbackGraph = null
       currentKeepTiles = emptySet()
+      currentKeepCenter = null
+      currentFallbackEvalCenter = null
+      lastFallbackEvalPublishedCenter = null
       evictionCount = 0
       memoryHits = 0L
       memoryMisses = 0L
@@ -351,20 +392,65 @@ class RoadGraphRepository(
     }
   }
 
+  private fun hasPrimaryWayWithin150mLocked(center: GeoPoint): Boolean {
+    for (entry in tileEntries.values) {
+      if (hasWayWithinRadius(entry.graph.ways.values, center, 150.0)) return true
+    }
+    for (cell in overpassEntries.values) {
+      if (hasWayWithinRadius(cell.graph.ways.values, center, 150.0)) return true
+    }
+    return false
+  }
+
+  private fun hasWayWithinRadius(
+    ways: Collection<OsmWay>,
+    center: GeoPoint,
+    radiusMeters: Double,
+  ): Boolean {
+    if (ways.isEmpty()) return false
+    val marginLat = (radiusMeters + 50.0) / 111_320.0
+    val cosLat = kotlin.math.cos(Math.toRadians(center.lat)).coerceAtLeast(0.15)
+    val marginLon = (radiusMeters + 50.0) / (111_320.0 * cosLat)
+    for (w in ways) {
+      if (w.points.size < 2) continue
+      var minLat = 90.0
+      var maxLat = -90.0
+      var minLon = 180.0
+      var maxLon = -180.0
+      for (p in w.points) {
+        if (p.lat < minLat) minLat = p.lat
+        if (p.lat > maxLat) maxLat = p.lat
+        if (p.lon < minLon) minLon = p.lon
+        if (p.lon > maxLon) maxLon = p.lon
+      }
+      if (center.lat < minLat - marginLat || center.lat > maxLat + marginLat) continue
+      if (maxLon - minLon < 180.0) {
+        val normLon = GeoMath.normalizeLon(center.lon)
+        if (normLon < minLon - marginLon || normLon > maxLon + marginLon) continue
+      }
+      if (GeoMath.snapToPolyline(center, w.points).distanceMeters <= radiusMeters) {
+        return true
+      }
+    }
+    return false
+  }
+
   private fun rebuildAndPublishLocked(): GraphSnapshot {
-    val startNs = System.nanoTime()
     val mergedNodes = HashMap<Long, OsmNode>(4096)
     val mergedWays = HashMap<Long, OsmWay>(2048)
+    val wayOriginTileById = HashMap<Long, String>(2048)
     val nodeToWays = HashMap<Long, MutableList<Long>>(4096)
     val loadedTiles = ArrayList<LoadedTileBounds>(tileEntries.size)
     val tileTimestamps = HashMap<String, Long>(tileEntries.size)
     val emptyKeys = HashSet<String>()
     val labelsByTile = HashMap<String, List<TileNameLabelRecord>>(tileEntries.size)
     val allPois = LinkedHashMap<Long, PoiItem>(256)
+    val tileWayCounts = ArrayList<Int>(tileEntries.size)
     var latestFetchedAt = 0L
     var allFromCache = true
     var tileEdgeCount = 0
     var overpassEdgeCount = 0
+    var idCollisions = 0
 
     // 1. Tile baseline (all decoded z14 tiles)
     for ((k, entry) in tileEntries) {
@@ -375,33 +461,30 @@ class RoadGraphRepository(
       for (p in entry.pois) allPois[p.id] = p
       latestFetchedAt = max(latestFetchedAt, entry.fetchedAtMs)
       if (!entry.graph.fromCache) allFromCache = false
+      tileWayCounts += entry.graph.ways.size
 
       mergedNodes.putAll(entry.graph.nodes)
       for ((wId, way) in entry.graph.ways) {
+        val prevWay = mergedWays[wId]
+        val prevTile = wayOriginTileById[wId]
+        if (prevWay != null && (prevWay.source != way.source || (prevTile != null && prevTile != k))) {
+          idCollisions++
+        }
         mergedWays[wId] = way
+        wayOriginTileById[wId] = k
         tileEdgeCount++
         for (nid in way.nodeIds.distinct()) {
-          nodeToWays.getOrPut(nid) { ArrayList(3) }.add(wId)
+          val list = nodeToWays.getOrPut(nid) { ArrayList(3) }
+          if (wId !in list) list.add(wId)
         }
       }
     }
 
-    // 2. Fallback live map ways if tiles empty for an area
-    val fallback = mapFallbackGraph
-    var usedFallback = false
-    if (fallback != null && fallback.ways.isNotEmpty() && mergedWays.isEmpty()) {
-      usedFallback = true
-      latestFetchedAt = max(latestFetchedAt, fallback.fetchedAtMs)
-      mergedNodes.putAll(fallback.nodes)
-      for ((wId, way) in fallback.ways) {
-        mergedWays[wId] = way
-        for (nid in way.nodeIds.distinct()) {
-          nodeToWays.getOrPut(nid) { ArrayList(3) }.add(wId)
-        }
-      }
-    }
+    val waysPerTileMin = if (tileWayCounts.isEmpty()) 0 else tileWayCounts.min()
+    val waysPerTileMax = if (tileWayCounts.isEmpty()) 0 else tileWayCounts.max()
+    val waysPerTileAvg = if (tileWayCounts.isEmpty()) 0.0 else tileWayCounts.sum().toDouble() / tileWayCounts.size.toDouble()
 
-    // 3. Overpass enrichment (Overpass enriches overlapping tile tags + adds missing ways without deleting)
+    // 2. Overpass enrichment (Overpass enriches overlapping tile tags + adds missing ways without deleting)
     var hasOverpass = false
     if (overpassEntries.isNotEmpty()) {
       val baseIndex =
@@ -453,11 +536,16 @@ class RoadGraphRepository(
 
         for (oldId in toReplaceTileIds) {
           val removed = mergedWays.remove(oldId) ?: continue
-          for (nid in removed.nodeIds) {
+          wayOriginTileById.remove(oldId)
+          for (nid in removed.nodeIds.distinct()) {
             nodeToWays[nid]?.remove(oldId)
           }
         }
         for (oWay in enrichedOvWays) {
+          val prev = mergedWays[oWay.id]
+          if (prev != null && prev.source != oWay.source) {
+            idCollisions++
+          }
           mergedWays[oWay.id] = oWay
           overpassEdgeCount++
           for (nid in oWay.nodeIds.distinct()) {
@@ -468,19 +556,74 @@ class RoadGraphRepository(
       }
     }
 
+    // 3. Live-map fallback: whenever user position has NO tile/Overpass edge within 150 m,
+    // merge fallback ways within 400 m of user without ever overriding existing tile/Overpass ways.
+    val evalCenter = currentFallbackEvalCenter ?: currentKeepCenter
+    val hasPrimaryEdgeWithin150m =
+      if (evalCenter != null) hasWayWithinRadius(mergedWays.values, evalCenter, 150.0)
+      else mergedWays.isNotEmpty()
+    lastFallbackEvalPublishedCenter = evalCenter
+
+    val fallback = mapFallbackGraph
+    var mapFallbackWaysAdded = 0
+    if (!hasPrimaryEdgeWithin150m && fallback != null && fallback.ways.isNotEmpty()) {
+      for ((_, fWay) in fallback.ways) {
+        if (fWay.points.size < 2) continue
+        if (evalCenter != null && GeoMath.snapToPolyline(evalCenter, fWay.points).distanceMeters > 400.0) {
+          continue
+        }
+        val existing = mergedWays[fWay.id]
+        if (existing != null) {
+          if (existing.source != fWay.source) {
+            idCollisions++
+          }
+          continue
+        }
+        for (i in fWay.nodeIds.indices) {
+          val nid = fWay.nodeIds[i]
+          if (!mergedNodes.containsKey(nid)) {
+            val pt = fWay.points.getOrNull(i)
+            val node = fallback.nodes[nid] ?: pt?.let { OsmNode(id = nid, point = it) }
+            if (node != null) mergedNodes[nid] = node
+          }
+        }
+        mergedWays[fWay.id] = fWay
+        mapFallbackWaysAdded++
+        for (nid in fWay.nodeIds.distinct()) {
+          val list = nodeToWays.getOrPut(nid) { ArrayList(3) }
+          if (fWay.id !in list) list.add(fWay.id)
+        }
+      }
+      if (mapFallbackWaysAdded > 0) {
+        latestFetchedAt = max(latestFetchedAt, fallback.fetchedAtMs)
+      }
+    }
+    val usedFallback = mapFallbackWaysAdded > 0
+
+    var danglingNodeRefs = 0
+    for (list in nodeToWays.values) {
+      for (wId in list) {
+        if (wId !in mergedWays) danglingNodeRefs++
+      }
+    }
+
     val hasTiles = tileEntries.values.any { it.graph.ways.isNotEmpty() }
     val source =
       when {
         hasTiles && hasOverpass -> GraphDataSource.MERGED
         hasOverpass -> GraphDataSource.OVERPASS
+        hasTiles && usedFallback -> GraphDataSource.MERGED
         hasTiles -> GraphDataSource.TILES
         usedFallback -> GraphDataSource.MAP
         else -> GraphDataSource.TILES
       }
     val sourceLabel =
       when {
+        hasTiles && hasOverpass && usedFallback -> "merged(tiles+ovp+map)"
         hasTiles && hasOverpass -> "merged(tiles+ovp)"
+        hasOverpass && usedFallback -> "merged(ovp+map)"
         hasOverpass -> "overpass"
+        hasTiles && usedFallback -> "merged(tiles+map)"
         hasTiles -> "tiles"
         usedFallback -> "map"
         else -> "none"
@@ -516,6 +659,14 @@ class RoadGraphRepository(
         labelsByTile = labelsByTile,
         overpassEdgeCount = overpassEdgeCount,
         tileEdgeCount = tileEdgeCount,
+        idCollisions = idCollisions,
+        danglingNodeRefs = danglingNodeRefs,
+        waysPerTileMin = waysPerTileMin,
+        waysPerTileAvg = waysPerTileAvg,
+        waysPerTileMax = waysPerTileMax,
+        mapFallbackUsed = usedFallback,
+        mapFallbackWaysAdded = mapFallbackWaysAdded,
+        hasPrimaryEdgeWithin150m = hasPrimaryEdgeWithin150m,
       )
     _snapshot.value = snap
     return snap

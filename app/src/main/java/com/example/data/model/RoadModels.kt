@@ -14,6 +14,11 @@ enum class ThemePreference {
   DARK,
 }
 
+enum class PanelStyle {
+  ALWAYS_DARK,
+  FOLLOW_MAP,
+}
+
 enum class UnitPreference {
   AUTO,
   METRIC,
@@ -916,6 +921,8 @@ data class PipelineDiagnostics(
   val graphVersion: Long = 0L,
   val rollingWindowSummary: String = "",
   val horizonStatsSummary: String = "",
+  val idCollisions: Int = 0,
+  val danglingNodeRefs: Int = 0,
 )
 
 enum class DebugEdgeCategory {

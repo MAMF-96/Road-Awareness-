@@ -8,7 +8,9 @@ import com.example.data.model.TravelMode
 import kotlin.math.abs
 
 object RoadGeometryStepper {
-  private val WALKING_ONLY_HIGHWAYS = setOf("footway", "path", "pedestrian", "steps", "cycleway")
+  private val NON_DRIVING_HIGHWAYS =
+    setOf("footway", "path", "pedestrian", "steps", "cycleway", "corridor", "raceway", "bus_guideway")
+  private val NON_WALKING_HIGHWAYS = setOf("motorway", "motorway_link", "raceway", "bus_guideway")
   private val IGNORED_DRIVING_SERVICES = setOf("driveway", "parking_aisle", "drive-through")
 
   data class StepResult(
@@ -217,8 +219,10 @@ object RoadGeometryStepper {
     val hw = way.tags.highway?.lowercase()?.trim() ?: return false
     if (hw == "construction" || way.tags.access?.lowercase()?.trim() == "no") return false
     if (mode == TravelMode.DRIVING) {
-      if (hw in WALKING_ONLY_HIGHWAYS) return false
+      if (hw in NON_DRIVING_HIGHWAYS) return false
       if (hw == "service" && way.tags.service?.lowercase()?.trim() in IGNORED_DRIVING_SERVICES) return false
+    } else {
+      if (hw in NON_WALKING_HIGHWAYS) return false
     }
     return true
   }

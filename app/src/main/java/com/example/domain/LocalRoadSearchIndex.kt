@@ -167,6 +167,7 @@ object LocalRoadSearchIndex {
     val waysByGroupKey = LinkedHashMap<String, MutableList<OsmWay>>()
     for (way in graph.ways.values) {
       if (way.points.size < 2) continue
+      if (way.id != matched?.way?.id && !AheadGraphAnalyzer.isRelevantForMode(way, mode)) continue
       val bName = BilingualName.fromOsmTags(way.tags)
       if (!bName.hasAny) continue
       val rawKey =
@@ -462,6 +463,7 @@ object LocalRoadSearchIndex {
         for (wId in graph.nodeToWays[lastNodeId].orEmpty()) {
           if (wId in visited) continue
           val w = graph.ways[wId] ?: continue
+          if (!AheadGraphAnalyzer.isRelevantForMode(w, mode)) continue
           if (AheadGraphAnalyzer.evaluateBranchStatus(w, true, mode) == BranchStatus.BLOCKED &&
             AheadGraphAnalyzer.evaluateBranchStatus(w, false, mode) == BranchStatus.BLOCKED
           ) {
@@ -525,6 +527,7 @@ object LocalRoadSearchIndex {
         for (wId in graph.nodeToWays[lastNodeId].orEmpty()) {
           if (wId in visited) continue
           val w = graph.ways[wId] ?: continue
+          if (!AheadGraphAnalyzer.isRelevantForMode(w, mode)) continue
           val idx = w.nodeIds.indexOf(lastNodeId)
           if (idx < 0) continue
           if (idx + 1 < w.points.size) {
@@ -620,6 +623,7 @@ object LocalRoadSearchIndex {
       val curOnCorridor = corridorWayIds.containsAnyNode(graph, cur.nodeId) && cur.turnsOffCorridor == 0
       for (wId in graph.nodeToWays[cur.nodeId].orEmpty()) {
         val way = graph.ways[wId] ?: continue
+        if (way.id != matched.way.id && !AheadGraphAnalyzer.isRelevantForMode(way, mode)) continue
         val idx = way.nodeIds.indexOf(cur.nodeId)
         if (idx < 0) continue
 
@@ -1031,6 +1035,7 @@ object LocalRoadSearchIndex {
     var bestSnap: GeoMath.PolylineSnap? = null
     for (w in graph.ways.values) {
       if (w.points.size < 2) continue
+      if (w.id != matched.way.id && !AheadGraphAnalyzer.isRelevantForMode(w, mode)) continue
       val snap = GeoMath.snapToPolyline(poi.point, w.points)
       if (snap.distanceMeters <= lateralMax && (bestSnap == null || snap.distanceMeters < bestSnap.distanceMeters)) {
         bestSnap = snap

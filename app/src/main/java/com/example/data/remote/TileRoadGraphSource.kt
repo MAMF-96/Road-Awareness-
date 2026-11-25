@@ -1164,7 +1164,7 @@ class TileRoadGraphSource(
      */
     fun buildRoadGraphFromLiveFeatures(
       features: List<LiveMapVectorFeature>,
-      mode: TravelMode,
+      @Suppress("UNUSED_PARAMETER") mode: TravelMode = TravelMode.DRIVING,
       fetchedAtMs: Long = System.currentTimeMillis(),
     ): RoadGraph {
       val labelFeats =
@@ -1195,7 +1195,7 @@ class TileRoadGraphSource(
       val syntheticTile = MvtDecoder.MvtTile(z = AppConfig.TILE_GRAPH_ZOOM, x = 0, y = 0, layers = layers)
       return buildRoadGraphFromDecodedTiles(
         tiles = listOf(syntheticTile),
-        mode = mode,
+        mode = TravelMode.DRIVING,
         fetchedAtMs = fetchedAtMs,
         fromCache = false,
         graphSource = GraphDataSource.MAP,
@@ -1346,7 +1346,7 @@ class TileRoadGraphSource(
      */
     fun buildRoadGraphFromDecodedTiles(
       tiles: List<MvtDecoder.MvtTile>,
-      mode: TravelMode,
+      @Suppress("UNUSED_PARAMETER") mode: TravelMode = TravelMode.DRIVING,
       fetchedAtMs: Long,
       fromCache: Boolean,
       graphSource: GraphDataSource = GraphDataSource.TILES,
@@ -1364,11 +1364,21 @@ class TileRoadGraphSource(
         val rawTagMap: Map<String, String>,
       )
       val segments = mutableListOf<RawSegment>()
-      var wayCounter = 1L
+      val namespace = if (graphSource == GraphDataSource.MAP) WAY_NS_MAP else WAY_NS_TILES
+      val countersByTile = HashMap<Long, Long>()
 
       for (tile in tiles) {
+        require(tile.z in 0..MAX_TILE_ZOOM) { "Tile zoom must be <= $MAX_TILE_ZOOM (got ${tile.z})" }
         val transLayer = tile.layers["transportation"] ?: continue
+        val tileKeyPacked =
+          (tile.z.toLong() shl 40) or
+            ((tile.x.toLong() and 0xFFFFL) shl 20) or
+            (tile.y.toLong() and 0xFFFFL)
+        var tileCounter = countersByTile[tileKeyPacked] ?: 0L
+        var overflowedTile = tileCounter >= MAX_WAY_COUNTER
+
         for (feat in transLayer.features) {
+          if (overflowedTile) break
           if (feat.geomType != MvtDecoder.GeomType.LINESTRING) continue
           val props = feat.tags
           val tClass = props["class"]?.lowercase(Locale.US)
@@ -1376,7 +1386,6 @@ class TileRoadGraphSource(
           val ramp = props["ramp"] == "1" || props["ramp"] == "true"
           val service = props["service"]?.lowercase(Locale.US)
           val mappedHighway = mapTileClassToHighway(tClass, subclass, service, ramp) ?: continue
-          if (!isTileHighwayAllowedForMode(mappedHighway, mode)) continue
 
           val baseMap = LinkedHashMap<String, String>()
           baseMap["highway"] = mappedHighway
@@ -1392,6 +1401,16 @@ class TileRoadGraphSource(
 
           for (poly in feat.geometries) {
             if (poly.size < 2) continue
+            if (tileCounter >= MAX_WAY_COUNTER) {
+              overflowedTile = true
+              runCatching {
+                android.util.Log.w(
+                  "TileRoadGraphSource",
+                  "Tile ${tile.z}/${tile.x}/${tile.y} (ns=$namespace) exceeded $MAX_WAY_COUNTER segments; skipping further segments",
+                )
+              }
+              break
+            }
             val sanitized =
               poly.map { pt ->
                 GeoPoint(
@@ -1399,12 +1418,11 @@ class TileRoadGraphSource(
                   lon = GeoMath.normalizeLon(roundTo1e6(pt.lon)),
                 )
               }
-            val tileSeedBase =
-              if (graphSource == GraphDataSource.MAP) 2_500_000_000L
-              else 2_000_000_000L + ((tile.x.toLong() and 0x3FFFL) shl 20) + ((tile.y.toLong() and 0x3FFFL) shl 6)
-            segments += RawSegment(-(tileSeedBase + wayCounter++), sanitized, tClass, mappedHighway, baseMap)
+            val wayId = encodeWayId(namespace, tile.z, tile.x, tile.y, tileCounter++)
+            segments += RawSegment(wayId, sanitized, tClass, mappedHighway, baseMap)
           }
         }
+        countersByTile[tileKeyPacked] = tileCounter
       }
 
       val nodes = HashMap<Long, OsmNode>(segments.size * 4)
@@ -1448,7 +1466,8 @@ class TileRoadGraphSource(
           )
         ways[way.id] = way
         for (nid in ndIds.distinct()) {
-          nodeToWays.getOrPut(nid) { mutableListOf() }.add(way.id)
+          val list = nodeToWays.getOrPut(nid) { ArrayList(3) }
+          if (way.id !in list) list.add(way.id)
         }
       }
 
@@ -1584,36 +1603,87 @@ class TileRoadGraphSource(
       }
     }
 
-    private fun isTileHighwayAllowedForMode(highway: String, mode: TravelMode): Boolean {
-      return if (mode == TravelMode.DRIVING) {
-        highway !in setOf("footway", "steps", "path", "corridor", "pedestrian", "cycleway", "raceway", "bus_guideway")
-      } else {
-        highway !in setOf("motorway", "motorway_link", "raceway", "bus_guideway")
-      }
+    const val WAY_NS_TILES = 1
+    const val WAY_NS_MAP = 2
+    const val MAX_WAY_COUNTER = 1L shl 20
+    const val MAX_TILE_ZOOM = 16
+
+    fun encodeWayId(namespace: Int, z: Int, x: Int, y: Int, counter: Long): Long {
+      require(namespace in 1..31) { "Namespace must be in 1..31 (got $namespace)" }
+      require(z in 0..MAX_TILE_ZOOM) { "Zoom must be <= $MAX_TILE_ZOOM (got $z)" }
+      require(counter in 0 until MAX_WAY_COUNTER) { "Way counter $counter exceeds < $MAX_WAY_COUNTER" }
+      val magnitude =
+        (namespace.toLong() shl 57) or
+          (z.toLong() shl 52) or
+          ((x.toLong() and 0xFFFFL) shl 36) or
+          ((y.toLong() and 0xFFFFL) shl 20) or
+          counter
+      return -magnitude
     }
 
-    private fun mergeGraphsSimple(graphs: List<RoadGraph>): RoadGraph {
-      if (graphs.size == 1) return graphs[0]
+    internal data class SimpleMergeResult(
+      val graph: RoadGraph,
+      val idCollisions: Int,
+      val danglingNodeRefs: Int,
+    )
+
+    internal fun mergeGraphsSimpleWithStats(graphs: List<RoadGraph>): SimpleMergeResult {
+      if (graphs.size == 1) {
+        val g = graphs[0]
+        val cleanNodeToWays = HashMap<Long, MutableList<Long>>(g.nodeToWays.size)
+        var dangling = 0
+        for ((nid, wIds) in g.nodeToWays) {
+          val distinctIds = ArrayList<Long>(wIds.size)
+          for (wid in wIds) {
+            if (wid !in g.ways) dangling++
+            if (wid !in distinctIds) distinctIds += wid
+          }
+          cleanNodeToWays[nid] = distinctIds
+        }
+        return SimpleMergeResult(g.copy(nodeToWays = cleanNodeToWays), idCollisions = 0, danglingNodeRefs = dangling)
+      }
       val nodes = HashMap<Long, OsmNode>()
       val ways = HashMap<Long, OsmWay>()
+      val wayOriginGraphIdx = HashMap<Long, Int>()
       val nodeToWays = HashMap<Long, MutableList<Long>>()
       val bounds = ArrayList<LoadedTileBounds>()
       var latest = 0L
       var allCached = true
-      for (g in graphs) {
+      var collisions = 0
+      for ((gIdx, g) in graphs.withIndex()) {
         if (g.fetchedAtMs > latest) latest = g.fetchedAtMs
         if (!g.fromCache) allCached = false
         nodes.putAll(g.nodes)
         bounds.addAll(g.loadedTiles)
         for ((id, w) in g.ways) {
+          val prev = ways[id]
+          val prevIdx = wayOriginGraphIdx[id]
+          if (prev != null && (prev.source != w.source || (w.source == GraphDataSource.TILES && prevIdx != gIdx))) {
+            collisions++
+          }
           ways[id] = w
+          wayOriginGraphIdx[id] = gIdx
           for (nid in w.nodeIds.distinct()) {
-            nodeToWays.getOrPut(nid) { mutableListOf() }.add(id)
+            val list = nodeToWays.getOrPut(nid) { ArrayList(3) }
+            if (id !in list) list.add(id)
           }
         }
       }
-      return RoadGraph(nodes, ways, nodeToWays, latest, allCached, GraphDataSource.TILES, bounds.distinct())
+      var dangling = 0
+      for (list in nodeToWays.values) {
+        for (wid in list) {
+          if (wid !in ways) dangling++
+        }
+      }
+      return SimpleMergeResult(
+        graph = RoadGraph(nodes, ways, nodeToWays, latest, allCached, GraphDataSource.TILES, bounds.distinct()),
+        idCollisions = collisions,
+        danglingNodeRefs = dangling,
+      )
     }
+
+    private fun mergeGraphsSimple(graphs: List<RoadGraph>): RoadGraph =
+      mergeGraphsSimpleWithStats(graphs).graph
 
     fun roundTo1e6(v: Double): Double =
       (v * AppConfig.TILE_ENDPOINT_ROUND_SCALE).roundToLong() / AppConfig.TILE_ENDPOINT_ROUND_SCALE

@@ -832,7 +832,8 @@ class WorldwideAndPipelineTest {
     composeRule.waitForIdle()
 
     composeRule.onNodeWithTag("inspector_pipeline_summary").assertIsDisplayed()
-    composeRule.onNodeWithText("Pipeline summary: a✓ b✓ c✗ d✓ e✗ f✓ g✓ h✓").assertIsDisplayed()
+    composeRule.onNodeWithText("Pipeline summary: a✓ b✓ c✗ d✓ e✗ f✓ g✓ h✓", substring = true).assertIsDisplayed()
+    composeRule.onNodeWithText("col=0 dang=0", substring = true).assertIsDisplayed()
     composeRule.onNodeWithTag("inspector_restore_default_spots_button").performScrollTo()
     composeRule.onNodeWithTag("inspector_restore_default_spots_button").assertIsDisplayed()
     composeRule.onNodeWithTag("inspector_restore_default_spots_button").performClick()

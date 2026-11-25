@@ -19,6 +19,9 @@ import kotlin.math.max
 
 object MapMatcher {
   private val WALKING_ONLY_HIGHWAYS = setOf("footway", "path", "pedestrian", "steps", "cycleway")
+  private val NON_DRIVING_HIGHWAYS =
+    setOf("footway", "path", "pedestrian", "steps", "cycleway", "corridor", "raceway", "bus_guideway")
+  private val NON_WALKING_HIGHWAYS = setOf("motorway", "motorway_link", "raceway", "bus_guideway")
   private val DRIVING_PREFERRED_HIGHWAYS =
     setOf(
       "motorway",
@@ -356,12 +359,16 @@ object MapMatcher {
 
     for (way in ways) {
       if (way.points.size < 2) continue
-      val hw = way.tags.highway
+      val hw = way.tags.highway?.lowercase()?.trim()
       if (hw == null) {
         droppedByClass++
         continue
       }
-      if (mode == TravelMode.DRIVING && hw in WALKING_ONLY_HIGHWAYS) {
+      if (mode == TravelMode.DRIVING && hw in NON_DRIVING_HIGHWAYS) {
+        droppedByClass++
+        continue
+      }
+      if (mode == TravelMode.WALKING && hw in NON_WALKING_HIGHWAYS) {
         droppedByClass++
         continue
       }

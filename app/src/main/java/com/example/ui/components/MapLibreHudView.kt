@@ -44,8 +44,8 @@ import com.example.data.remote.DarkMapStyleGenerator
 import com.example.data.remote.DebugNetworkSimulator
 import com.example.domain.GeoMath
 import com.example.ui.RoadHudUiState
-import com.example.ui.theme.LocalRoadColors
 import com.example.ui.theme.RoadColors
+import com.example.ui.theme.resolveIsMapDark
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.delay
 import okhttp3.OkHttpClient
@@ -151,6 +151,7 @@ fun MapLibreHudView(
   onStyleErrorChange: (String?) -> Unit,
   onTileRoadHintChanged: (TileRoadHint?) -> Unit = {},
   onLiveMapVectorFallback: (List<LiveMapVectorFeature>) -> Unit = {},
+  onLiveMapVectorFallbackWithCount: ((List<LiveMapVectorFeature>, Int) -> Unit)? = null,
   onFoundTargetOffScreenChange: (Boolean) -> Unit = {},
   modifier: Modifier = Modifier,
 ) {
@@ -171,6 +172,7 @@ fun MapLibreHudView(
     onStyleErrorChange = onStyleErrorChange,
     onTileRoadHintChanged = onTileRoadHintChanged,
     onLiveMapVectorFallback = onLiveMapVectorFallback,
+    onLiveMapVectorFallbackWithCount = onLiveMapVectorFallbackWithCount,
     onFoundTargetOffScreenChange = onFoundTargetOffScreenChange,
     modifier = modifier,
   )
@@ -194,12 +196,13 @@ private fun MapLibreHudViewInternal(
   onStyleErrorChange: (String?) -> Unit,
   onTileRoadHintChanged: (TileRoadHint?) -> Unit,
   onLiveMapVectorFallback: (List<LiveMapVectorFeature>) -> Unit,
+  onLiveMapVectorFallbackWithCount: ((List<LiveMapVectorFeature>, Int) -> Unit)?,
   onFoundTargetOffScreenChange: (Boolean) -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val context = LocalContext.current
   val lifecycleOwner = LocalLifecycleOwner.current
-  val isDark = LocalRoadColors.current.isDark
+  val isMapDark = resolveIsMapDark(uiState.settings.themePreference)
 
   val currentUiState by rememberUpdatedState(uiState)
   val currentOnFeaturePinClick by rememberUpdatedState(onFeaturePinClick)
@@ -211,6 +214,7 @@ private fun MapLibreHudViewInternal(
   val currentOnStyleErrorChange by rememberUpdatedState(onStyleErrorChange)
   val currentOnTileRoadHintChanged by rememberUpdatedState(onTileRoadHintChanged)
   val currentOnLiveMapVectorFallback by rememberUpdatedState(onLiveMapVectorFallback)
+  val currentOnLiveMapVectorFallbackWithCount by rememberUpdatedState(onLiveMapVectorFallbackWithCount)
   val currentOnFoundTargetOffScreenChange by rememberUpdatedState(onFoundTargetOffScreenChange)
 
   remember(context) {
@@ -413,7 +417,7 @@ private fun MapLibreHudViewInternal(
     }
   }
 
-  var fallbackApplied by remember(isDark) { mutableStateOf(false) }
+  var fallbackApplied by remember(isMapDark) { mutableStateOf(false) }
 
   fun applyStyleWithHudPreserved(
     map: MapLibreMap,
@@ -422,6 +426,10 @@ private fun MapLibreHudViewInternal(
     clearErrorOnSuccess: Boolean,
     darkTheme: Boolean,
   ) {
+    val liveCam =
+      map.cameraPosition.takeIf { cam ->
+        cam.target?.let { it.latitude != 0.0 || it.longitude != 0.0 } == true
+      } ?: savedCamera
     map.setStyle(builder) { style ->
       if (!isMapDestroyed && !mapView.isDestroyed && map.style === style && style.isFullyLoaded) {
         if (clearErrorOnSuccess) {
@@ -429,26 +437,26 @@ private fun MapLibreHudViewInternal(
         }
         setupHudLayers(style)
         loadedStyle = style
-        syncHudLayers(context, style, currentUiState, isDark = darkTheme)
-        if (savedCamera.target != null) {
-          map.moveCamera(CameraUpdateFactory.newCameraPosition(savedCamera))
+        syncHudLayers(context, style, currentUiState, isMapDark = darkTheme)
+        if (liveCam.target != null) {
+          map.moveCamera(CameraUpdateFactory.newCameraPosition(liveCam))
         }
       }
     }
   }
 
-  LaunchedEffect(mapInstance, isDark) {
+  LaunchedEffect(mapInstance, isMapDark) {
     val map = mapInstance ?: return@LaunchedEffect
     if (isMapDestroyed || mapView.isDestroyed) return@LaunchedEffect
-    if (lastLoadedDarkTheme == isDark && loadedStyle != null) return@LaunchedEffect
-    lastLoadedDarkTheme = isDark
+    if (lastLoadedDarkTheme == isMapDark && loadedStyle != null) return@LaunchedEffect
+    lastLoadedDarkTheme = isMapDark
     loadedStyle = null
     val savedCam = map.cameraPosition
 
-    val result = DarkMapStyleGenerator.loadStyleForTheme(context.applicationContext, isDark = isDark)
+    val result = DarkMapStyleGenerator.loadStyleForTheme(context.applicationContext, isDark = isMapDark)
     if (isMapDestroyed || mapView.isDestroyed) return@LaunchedEffect
 
-    if (isDark) {
+    if (isMapDark) {
       when {
         result.darkStyleJson != null -> {
           currentOnStyleErrorChange(result.diagnosticError)
@@ -504,7 +512,7 @@ private fun MapLibreHudViewInternal(
     }
   }
 
-  DisposableEffect(mapView, mapInstance, isDark) {
+  DisposableEffect(mapView, mapInstance, isMapDark) {
     val failListener =
       MapView.OnDidFailLoadingMapListener { errorMsg ->
         val map = mapInstance ?: return@OnDidFailLoadingMapListener
@@ -521,7 +529,7 @@ private fun MapLibreHudViewInternal(
           builder = Style.Builder().fromJson(buildRasterStyleJson(fallbackUrl)),
           savedCamera = savedCam,
           clearErrorOnSuccess = false,
-          darkTheme = isDark,
+          darkTheme = isMapDark,
         )
       }
     mapView.addOnDidFailLoadingMapListener(failListener)
@@ -531,7 +539,7 @@ private fun MapLibreHudViewInternal(
   LaunchedEffect(
     mapInstance,
     loadedStyle,
-    isDark,
+    isMapDark,
     uiState.location,
     uiState.displayLocationPoint,
     uiState.displayHeadingDeg,
@@ -556,7 +564,7 @@ private fun MapLibreHudViewInternal(
     val map = mapInstance ?: return@LaunchedEffect
     val style = map.style ?: return@LaunchedEffect
     if (style !== loadedStyle || !style.isFullyLoaded) return@LaunchedEffect
-    syncHudLayers(context, style, uiState, isDark = isDark)
+    syncHudLayers(context, style, uiState, isMapDark = isMapDark)
     currentOnTileRoadHintChanged(null)
   }
 
@@ -564,19 +572,16 @@ private fun MapLibreHudViewInternal(
   LaunchedEffect(
     mapInstance,
     loadedStyle,
-    uiState.location?.point,
-    uiState.travelMode,
-    uiState.hasConfirmedGraphData,
-    uiState.roadNameSource,
-    uiState.isGraphErrorState,
-    uiState.matchResult.primary,
+    uiState.needsMapFallbackWithin150m,
+    uiState.mapFallbackTriggerTick,
   ) {
     if (isMapDestroyed || mapView.isDestroyed) return@LaunchedEffect
-    val loc = uiState.location ?: return@LaunchedEffect
+    val loc = currentUiState.location ?: return@LaunchedEffect
     val needsLiveFallback =
-      !uiState.hasConfirmedGraphData ||
-        uiState.roadNameSource == "none" ||
-        uiState.isGraphErrorState
+      uiState.needsMapFallbackWithin150m ||
+        !currentUiState.hasConfirmedGraphData ||
+        currentUiState.roadNameSource == "none" ||
+        currentUiState.isGraphErrorState
     if (!needsLiveFallback) return@LaunchedEffect
     val map = mapInstance ?: return@LaunchedEffect
     val style = map.style ?: return@LaunchedEffect
@@ -585,7 +590,9 @@ private fun MapLibreHudViewInternal(
     delay(350L)
     if (isMapDestroyed || mapView.isDestroyed || !style.isFullyLoaded) return@LaunchedEffect
 
+    val latestLoc = currentUiState.location ?: loc
     val extracted = mutableListOf<LiveMapVectorFeature>()
+    var queriedTotal = 0
     val vectorSources = style.sources.filterIsInstance<VectorSource>()
     val layerNames = listOf("transportation", "transportation_name")
     for (vSource in vectorSources) {
@@ -593,6 +600,7 @@ private fun MapLibreHudViewInternal(
         val features =
           runCatching { vSource.querySourceFeatures(arrayOf(layerName), null) }
             .getOrDefault(emptyList())
+        queriedTotal += features.size
         for (feature in features) {
           val lines: List<List<GeoPoint>> =
             when (val geom = feature.geometry()) {
@@ -609,7 +617,7 @@ private fun MapLibreHudViewInternal(
           if (lines.isEmpty()) continue
           val nearEnough =
             lines.any { line ->
-              line.any { pt -> GeoMath.haversineMeters(loc.point, pt) <= 1_800.0 }
+              line.any { pt -> GeoMath.haversineMeters(latestLoc.point, pt) <= 1_800.0 }
             }
           if (!nearEnough) continue
           val tags = mutableMapOf<String, String>()
@@ -628,7 +636,10 @@ private fun MapLibreHudViewInternal(
       }
       if (extracted.size >= 400) break
     }
-    if (extracted.isNotEmpty()) {
+    val withCountCb = currentOnLiveMapVectorFallbackWithCount
+    if (withCountCb != null) {
+      withCountCb(extracted, queriedTotal)
+    } else if (extracted.isNotEmpty()) {
       currentOnLiveMapVectorFallback(extracted)
     }
   }
@@ -1134,18 +1145,18 @@ private fun syncHudLayers(
   context: Context,
   style: Style,
   uiState: RoadHudUiState,
-  isDark: Boolean,
+  isMapDark: Boolean,
 ) {
   if (!style.isFullyLoaded) return
-  val lightVis = if (isDark) Property.NONE else Property.VISIBLE
+  val lightVis = if (isMapDark) Property.NONE else Property.VISIBLE
   style.getLayer(LYR_STUBS_CASING)?.setProperties(PropertyFactory.visibility(lightVis))
   style.getLayer(LYR_JUNCTION_DOT)?.setProperties(PropertyFactory.visibility(lightVis))
   style.getLayer(LYR_ROUTE_CASING)?.setProperties(PropertyFactory.visibility(lightVis))
   style.getLayer(LYR_SAVED_STREETS_CASING)?.setProperties(PropertyFactory.visibility(lightVis))
   style.getLayer(LYR_FOUND_ROAD_CASING)?.setProperties(PropertyFactory.visibility(lightVis))
   style.getLayer(LYR_USER_HALO)?.setProperties(
-    PropertyFactory.circleRadius(if (isDark) 12f else 10.5f),
-    PropertyFactory.circleStrokeWidth(if (isDark) 0f else 1.0f),
+    PropertyFactory.circleRadius(if (isMapDark) 12f else 10.5f),
+    PropertyFactory.circleStrokeWidth(if (isMapDark) 0f else 1.0f),
     PropertyFactory.circleStrokeColor(android.graphics.Color.argb(46, 11, 18, 32)),
   )
   // 1) User dot, mock lock badge & heading cone
@@ -1194,7 +1205,7 @@ private fun syncHudLayers(
   val junctionDotFeatures = mutableListOf<Feature>()
   val pinFeatures = mutableListOf<Feature>()
 
-  val themeKey = if (isDark) "d" else "l"
+  val themeKey = if (isMapDark) "d" else "l"
   if (offRoad.isOffRoad && offRoad.selectedCandidate == null) {
     offRoad.candidates.forEachIndexed { idx, cand ->
       val colorInt = RoadColors.pinColorForIndex(idx + 1).toArgb()
@@ -1207,7 +1218,7 @@ private fun syncHudLayers(
       }
       val iconId = "pin_${cand.badgeId}_${colorInt}_$themeKey"
       if (style.getImage(iconId) == null) {
-        style.addImage(iconId, createPinBitmap(context, cand.badgeId, colorInt, isDark))
+        style.addImage(iconId, createPinBitmap(context, cand.badgeId, colorInt, isMapDark))
       }
       val pf = Feature.fromGeometry(Point.fromLngLat(cand.closestPoint.lon, cand.closestPoint.lat))
       pf.addStringProperty("iconId", iconId)
@@ -1241,7 +1252,7 @@ private fun syncHudLayers(
           val pinLoc = branch.worldPoints.lastOrNull() ?: feat.anchor
           val iconId = "pin_${branch.badgeId}_${colorInt}_$themeKey"
           if (style.getImage(iconId) == null) {
-            style.addImage(iconId, createPinBitmap(context, branch.badgeId, colorInt, isDark))
+            style.addImage(iconId, createPinBitmap(context, branch.badgeId, colorInt, isMapDark))
           }
           val f = Feature.fromGeometry(Point.fromLngLat(pinLoc.lon, pinLoc.lat))
           f.addStringProperty("iconId", iconId)
@@ -1252,7 +1263,7 @@ private fun syncHudLayers(
         val label = "${feat.index}"
         val iconId = "pin_${label}_${colorInt}_$themeKey"
         if (style.getImage(iconId) == null) {
-          style.addImage(iconId, createPinBitmap(context, label, colorInt, isDark))
+          style.addImage(iconId, createPinBitmap(context, label, colorInt, isMapDark))
         }
         val f = Feature.fromGeometry(Point.fromLngLat(feat.anchor.lon, feat.anchor.lat))
         f.addStringProperty("iconId", iconId)
@@ -1287,7 +1298,7 @@ private fun syncHudLayers(
       val labelText = pin.mapLabelText()
       val iconId = "saved_pin_${pin.id}_${labelText.hashCode()}_$themeKey"
       if (style.getImage(iconId) == null) {
-        style.addImage(iconId, createSavedPinWithCapsuleBitmap(context, labelText, purpleInt, isDark))
+        style.addImage(iconId, createSavedPinWithCapsuleBitmap(context, labelText, purpleInt, isMapDark))
       }
       val pf = Feature.fromGeometry(Point.fromLngLat(pin.point.lon, pin.point.lat))
       pf.addNumberProperty("savedPinId", pin.id)
@@ -1314,7 +1325,7 @@ private fun syncHudLayers(
       activeFound.name.primaryText ?: activeFound.name.ref ?: activeFound.placeType
     val iconId = "found_pin_${activeFound.id}_${foundTitle.hashCode()}_$themeKey"
     if (style.getImage(iconId) == null) {
-      style.addImage(iconId, createSavedPinWithCapsuleBitmap(context, foundTitle, purpleInt, isDark))
+      style.addImage(iconId, createSavedPinWithCapsuleBitmap(context, foundTitle, purpleInt, isMapDark))
     }
     val pf = Feature.fromGeometry(Point.fromLngLat(activeFound.entryPoint.lon, activeFound.entryPoint.lat))
     pf.addStringProperty("iconId", iconId)
@@ -1335,17 +1346,12 @@ private fun syncHudLayers(
     style.getSourceAs<GeoJsonSource>(SRC_ROUTE)?.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
   }
 
-  // 6) Part C: Developer "Show graph edges on map" overlay (#00E5FF tile, #FF2EDB Overpass, #FFFFFF matched)
+  // 6) Part C: Developer "Show graph edges on map" overlay (light map: teal/magenta/black; dark map: cyan/magenta/white)
   val debugEdgeFeatures =
     if (BuildConfig.DEBUG && uiState.settings.showGraphEdges && uiState.debugGraphEdges.isNotEmpty()) {
       uiState.debugGraphEdges.mapNotNull { edge ->
         if (edge.points.size < 2) return@mapNotNull null
-        val hex =
-          when (edge.category) {
-            DebugEdgeCategory.TILE -> "#00E5FF"
-            DebugEdgeCategory.OVERPASS -> "#FF2EDB"
-            DebugEdgeCategory.MATCHED -> "#FFFFFF"
-          }
+        val hex = debugGraphEdgeColorHex(edge.category, isMapDark)
         val feat =
           Feature.fromGeometry(
             LineString.fromLngLats(edge.points.map { Point.fromLngLat(it.lon, it.lat) }),
@@ -1368,7 +1374,7 @@ private fun syncHudLayers(
         val title = lm.name.primaryText ?: return@mapNotNull null
         val iconId = "lm_${lm.id}_${title.hashCode()}_$themeKey"
         if (style.getImage(iconId) == null) {
-          style.addImage(iconId, createLandmarkBadgeBitmap(context, title, isDark))
+          style.addImage(iconId, createLandmarkBadgeBitmap(context, title, isMapDark))
         }
         Feature.fromGeometry(Point.fromLngLat(lm.point.lon, lm.point.lat)).apply {
           addStringProperty("iconId", iconId)
@@ -1380,6 +1386,24 @@ private fun syncHudLayers(
   style.getSourceAs<GeoJsonSource>(SRC_LANDMARKS)
     ?.setGeoJson(FeatureCollection.fromFeatures(landmarkFeatures))
 }
+
+internal fun debugGraphEdgeColorHex(
+  category: DebugEdgeCategory,
+  isMapDark: Boolean,
+): String =
+  if (isMapDark) {
+    when (category) {
+      DebugEdgeCategory.TILE -> "#00E5FF"
+      DebugEdgeCategory.OVERPASS -> "#FF2EDB"
+      DebugEdgeCategory.MATCHED -> "#FFFFFF"
+    }
+  } else {
+    when (category) {
+      DebugEdgeCategory.TILE -> "#0097A7"
+      DebugEdgeCategory.OVERPASS -> "#C2185B"
+      DebugEdgeCategory.MATCHED -> "#000000"
+    }
+  }
 
 /**
  * Generates a purple #7B3FE4 drop pin with a crisp white-capsule bilingual label (max 2 lines)

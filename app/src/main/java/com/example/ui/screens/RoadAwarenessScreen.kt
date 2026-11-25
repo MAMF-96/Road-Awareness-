@@ -89,6 +89,7 @@ import com.example.data.model.DeveloperOrientation
 import com.example.data.model.FeatureCensusEntry
 import com.example.data.model.FoundRoadMatch
 import com.example.data.model.LandscapePanelSide
+import com.example.data.model.PanelStyle
 import com.example.data.model.SavedPin
 import com.example.data.model.SearchPlaceResult
 import com.example.data.model.SearchScope
@@ -122,6 +123,7 @@ import com.example.ui.theme.LocalGlassConfig
 import com.example.ui.theme.LocalRoadColors
 import com.example.ui.theme.RoadColors
 import com.example.ui.theme.isSystemReduceTransparencyEnabled
+import com.example.ui.theme.resolveIsMapDark
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import kotlin.math.roundToInt
@@ -306,6 +308,7 @@ fun RoadAwarenessScreen(
     onClearAllPins = { viewModel.clearAllPins() },
     onDismissPinCallout = { viewModel.selectPinForCallout(null) },
     onSelectTheme = { viewModel.setThemePreference(it) },
+    onSelectPanelStyle = { viewModel.setPanelStyle(it) },
     onToggleExperimentalBlur = { viewModel.setExperimentalBlurEnabled(it) },
     onToggleReduceTransparency = { viewModel.setReduceTransparencyEnabled(it) },
     onToggleArabicTts = { viewModel.setArabicTtsEnabled(it) },
@@ -376,6 +379,9 @@ fun RoadAwarenessScreen(
           onStyleErrorChange = { err -> viewModel.reportMapStyleError(err) },
           onTileRoadHintChanged = { hint -> viewModel.onTileRoadHintChanged(hint) },
           onLiveMapVectorFallback = { features -> viewModel.ingestLiveMapVectorFeatures(features) },
+          onLiveMapVectorFallbackWithCount = { features, queried ->
+            viewModel.ingestLiveMapVectorFeatures(features, queried)
+          },
           onFoundTargetOffScreenChange = { off -> mapFoundTargetOffScreen = off },
           modifier = mod,
         )
@@ -425,6 +431,7 @@ fun RoadAwarenessScreenContent(
   onClearAllPins: () -> Unit = {},
   onDismissPinCallout: () -> Unit = {},
   onSelectTheme: (ThemePreference) -> Unit,
+  onSelectPanelStyle: (PanelStyle) -> Unit = {},
   onToggleExperimentalBlur: (Boolean) -> Unit = {},
   onToggleReduceTransparency: (Boolean) -> Unit = {},
   onToggleArabicTts: (Boolean) -> Unit,
@@ -505,11 +512,13 @@ fun RoadAwarenessScreenContent(
   val density = LocalDensity.current
   val layoutDir = LocalLayoutDirection.current
   val isDark = LocalRoadColors.current.isDark
+  val isMapDark = resolveIsMapDark(uiState.settings.themePreference)
   val hazeState = remember { HazeState() }
   val glassConfig =
-    remember(isDark, effectiveReduceTransparency, realGlassBlurActive, hazeState) {
+    remember(isDark, isMapDark, effectiveReduceTransparency, realGlassBlurActive, hazeState) {
       GlassRenderConfig(
         isDark = isDark,
+        isMapDark = isMapDark,
         reduceTransparency = effectiveReduceTransparency,
         useRealBlur = realGlassBlurActive,
         hazeState = if (realGlassBlurActive) hazeState else null,
@@ -646,20 +655,32 @@ fun RoadAwarenessScreenContent(
         )
       }
 
-      // 2. Subtle ~24dp gradient scrim under status bar for clock/icon readability
-      val scrimBase = if (isDark) Color.Black else Color.White
+      // 2. Dark gradient scrims under status bar (~32dp) and above gesture bar (~24dp) in both map styles
       Box(
         modifier =
           Modifier
             .align(Alignment.TopCenter)
             .fillMaxWidth()
-            .height(safeTopDp + 24.dp)
+            .height(safeTopDp + 32.dp)
             .background(
               Brush.verticalGradient(
-                listOf(scrimBase.copy(alpha = 0.60f), scrimBase.copy(alpha = 0f)),
+                listOf(Color.Black.copy(alpha = 0.55f), Color.Black.copy(alpha = 0f)),
               ),
             )
             .testTag("status_bar_scrim"),
+      )
+      Box(
+        modifier =
+          Modifier
+            .align(Alignment.BottomCenter)
+            .fillMaxWidth()
+            .height(safeBottomDp + 24.dp)
+            .background(
+              Brush.verticalGradient(
+                listOf(Color.Black.copy(alpha = 0f), Color.Black.copy(alpha = 0.40f)),
+              ),
+            )
+            .testTag("nav_bar_scrim"),
       )
 
       if (isLandscape) {
@@ -823,63 +844,17 @@ fun RoadAwarenessScreenContent(
                     )
                   }
 
-                  // Attribution chip at bottom-start of FREE area
+                  // Attribution chip at bottom-start of FREE area (always dark in both map styles)
                   val narrowLandscapeAttr = !isTablet
-                  val attrInteraction = rememberPressHapticInteractionSource()
-                  val attrPressed by attrInteraction.collectIsPressedAsState()
-                  Button(
-                    onClick = {
-                      TouchTelemetry.recordControlHandled("map_attribution_button")
-                      showAttributionDialog = true
-                    },
-                    interactionSource = attrInteraction,
-                    shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(
-                      containerColor = Color.Transparent,
-                      contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    ),
-                    elevation = null,
-                    contentPadding = PaddingValues(0.dp),
+                  MapAttributionChip(
+                    narrow = narrowLandscapeAttr,
+                    onClick = { showAttributionDialog = true },
                     modifier =
                       Modifier
                         .align(Alignment.BottomStart)
                         .padding(start = 8.dp, bottom = safeBottomDp + 6.dp)
-                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                        .widthIn(max = if (narrowLandscapeAttr) 78.dp else 96.dp)
-                        .testTag("map_attribution_button"),
-                  ) {
-                    GlassSurface(
-                      shape = RoundedCornerShape(14.dp),
-                      isLighterInner = true,
-                      withShadow = false,
-                      tintOverlay =
-                        if (attrPressed) {
-                          if (isDark) Color.White.copy(alpha = 0.14f) else Color(0x140B1220)
-                        } else Color.Transparent,
-                      modifier = Modifier.innerPressScale(attrInteraction),
-                    ) {
-                      Row(
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(3.dp),
-                      ) {
-                        Icon(
-                          imageVector = Icons.Default.Info,
-                          contentDescription = stringResource(R.string.attribution_content_desc),
-                          tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                          modifier = Modifier.size(11.dp),
-                        )
-                        Text(
-                          text = stringResource(R.string.attribution_compact),
-                          color = MaterialTheme.colorScheme.onSurfaceVariant,
-                          fontSize = if (narrowLandscapeAttr) 8.5.sp else 9.5.sp,
-                          lineHeight = if (narrowLandscapeAttr) 10.sp else 11.sp,
-                          fontWeight = FontWeight.Medium,
-                          maxLines = if (narrowLandscapeAttr) 2 else 1,
-                        )
-                      }
-                    }
-                  }
+                        .widthIn(max = if (narrowLandscapeAttr) 78.dp else 96.dp),
+                  )
 
                   // Bottom Pill (3 icon buttons, 56dp), centered horizontally at bottom of FREE map area.
                   // Alpha animation via graphicsLayer only; stays mounted & clickable so first touch works even when faded.
@@ -1141,64 +1116,18 @@ fun RoadAwarenessScreenContent(
           )
         }
 
-        // 6. Unobtrusive OSM & style provider attribution info control (bottom-start safe inset)
+        // 6. Unobtrusive OSM & style provider attribution info control (always dark in both map styles)
         val narrowPortraitAttribution = !isTablet
-        val portraitAttrInteraction = rememberPressHapticInteractionSource()
-        val portraitAttrPressed by portraitAttrInteraction.collectIsPressedAsState()
-        Button(
-          onClick = {
-            TouchTelemetry.recordControlHandled("map_attribution_button")
-            showAttributionDialog = true
-          },
-          interactionSource = portraitAttrInteraction,
-          shape = RoundedCornerShape(14.dp),
-          colors = ButtonDefaults.buttonColors(
-            containerColor = Color.Transparent,
-            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-          ),
-          elevation = null,
-          contentPadding = PaddingValues(0.dp),
+        MapAttributionChip(
+          narrow = narrowPortraitAttribution,
+          onClick = { showAttributionDialog = true },
           modifier =
             Modifier
               .align(Alignment.BottomStart)
               .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Start))
               .padding(start = 6.dp, bottom = 10.dp)
-              .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-              .then(if (narrowPortraitAttribution) Modifier.widthIn(max = 78.dp) else Modifier)
-              .testTag("map_attribution_button"),
-        ) {
-          GlassSurface(
-            shape = RoundedCornerShape(14.dp),
-            isLighterInner = true,
-            withShadow = false,
-            tintOverlay =
-              if (portraitAttrPressed) {
-                if (isDark) Color.White.copy(alpha = 0.14f) else Color(0x140B1220)
-              } else Color.Transparent,
-            modifier = Modifier.innerPressScale(portraitAttrInteraction),
-          ) {
-            Row(
-              modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-              Icon(
-                imageVector = Icons.Default.Info,
-                contentDescription = stringResource(R.string.attribution_content_desc),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(11.dp),
-              )
-              Text(
-                text = stringResource(R.string.attribution_compact),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = if (narrowPortraitAttribution) 8.5.sp else 10.sp,
-                lineHeight = if (narrowPortraitAttribution) 10.sp else 12.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = if (narrowPortraitAttribution) 2 else 1,
-              )
-            }
-          }
-        }
+              .then(if (narrowPortraitAttribution) Modifier.widthIn(max = 78.dp) else Modifier),
+        )
 
         // 7. Floating Bottom 3-Button Pill (graphicsLayer alpha fade only; always clickable on first touch)
         val pillBottomGapDp = 10.dp
@@ -1362,6 +1291,7 @@ fun RoadAwarenessScreenContent(
         SettingsBottomSheet(
           uiState = uiState,
           onSelectTheme = onSelectTheme,
+          onSelectPanelStyle = onSelectPanelStyle,
           onToggleExperimentalBlur = onToggleExperimentalBlur,
           onToggleReduceTransparency = onToggleReduceTransparency,
           onToggleArabicTts = onToggleArabicTts,
@@ -1431,6 +1361,69 @@ private fun FoundTargetOffScreenIndicator(
         fontWeight = FontWeight.Bold,
         maxLines = 1,
       )
+    }
+  }
+}
+
+@Composable
+private fun MapAttributionChip(
+  narrow: Boolean,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val currentGlass = LocalGlassConfig.current
+  val darkChipGlass = remember(currentGlass) { currentGlass.copy(isDark = true) }
+  val interaction = rememberPressHapticInteractionSource()
+  val pressed by interaction.collectIsPressedAsState()
+
+  Button(
+    onClick = {
+      TouchTelemetry.recordControlHandled("map_attribution_button")
+      onClick()
+    },
+    interactionSource = interaction,
+    shape = RoundedCornerShape(14.dp),
+    colors =
+      ButtonDefaults.buttonColors(
+        containerColor = Color.Transparent,
+        contentColor = RoadColors.DarkTextSecondary,
+      ),
+    elevation = null,
+    contentPadding = PaddingValues(0.dp),
+    modifier =
+      modifier
+        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+        .testTag("map_attribution_button"),
+  ) {
+    CompositionLocalProvider(LocalGlassConfig provides darkChipGlass) {
+      GlassSurface(
+        shape = RoundedCornerShape(14.dp),
+        isLighterInner = true,
+        withShadow = false,
+        tintOverlay = if (pressed) Color.White.copy(alpha = 0.14f) else Color.Transparent,
+        modifier = Modifier.innerPressScale(interaction),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+          Icon(
+            imageVector = Icons.Default.Info,
+            contentDescription = stringResource(R.string.attribution_content_desc),
+            tint = RoadColors.DarkTextSecondary,
+            modifier = Modifier.size(11.dp),
+          )
+          Text(
+            text = stringResource(R.string.attribution_compact),
+            color = RoadColors.DarkTextSecondary,
+            fontSize = if (narrow) 8.5.sp else 9.5.sp,
+            lineHeight = if (narrow) 10.sp else 11.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = if (narrow) 2 else 1,
+          )
+        }
+      }
     }
   }
 }

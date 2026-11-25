@@ -14,9 +14,11 @@ import com.example.data.local.TileCacheDao
 import com.example.data.local.TileCacheEntity
 import com.example.data.model.BilingualName
 import com.example.data.model.BranchStatus
+import com.example.data.model.DecodedTileArtifact
 import com.example.data.model.FeatureType
 import com.example.data.model.GeoPoint
 import com.example.data.model.GraphDataSource
+import com.example.data.model.LiveMapVectorFeature
 import com.example.data.model.LocalPoint
 import com.example.data.model.LocationSnapshot
 import com.example.data.model.MatchResult
@@ -35,7 +37,11 @@ import com.example.data.remote.DebugNetworkSimulator
 import com.example.data.remote.MvtDecoder
 import com.example.data.remote.OverpassMapDataSource
 import com.example.data.remote.TileRoadGraphSource
+import com.example.data.repository.RoadGraphRepository
+import com.example.domain.AheadGraphAnalyzer
+import com.example.domain.GeoMath
 import com.example.domain.GraphMerger
+import com.example.domain.MapMatcher
 import com.example.ui.RoadAwarenessViewModel
 import com.example.ui.RoadHudUiState
 import com.example.ui.components.buildInspectorPlainText
@@ -50,6 +56,7 @@ import java.net.UnknownHostException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import okhttp3.Interceptor
@@ -62,8 +69,10 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -470,6 +479,369 @@ class ReliableDataAndSimTest {
     val reset = vm.uiState.value
     assertFalse(reset.hasAnyDebugOverride)
     assertFalse(DebugNetworkSimulator.state.value.hasAnyActive)
+  }
+
+  private fun makeSyntheticMvtTile(
+    z: Int,
+    x: Int,
+    y: Int,
+    segmentCount: Int,
+    highwayClass: String = "primary",
+  ): MvtDecoder.MvtTile {
+    val bounds = TileRoadGraphSource.computeTileBounds(z, x, y)
+    val dLat = bounds.north - bounds.south
+    val dLon = bounds.east - bounds.west
+    val features =
+      (0 until segmentCount).map { idx ->
+        val row = (idx % 40) + 1
+        val col = idx / 40
+        val lat = bounds.south + (row.toDouble() / 42.0) * dLat
+        val lon0 = bounds.west + ((col * 2 + 1).toDouble() / 120.0).coerceIn(0.02, 0.90) * dLon
+        val lon1 = bounds.west + ((col * 2 + 2).toDouble() / 120.0).coerceIn(0.04, 0.98) * dLon
+        MvtDecoder.MvtFeature(
+          id = idx.toLong() + 1L,
+          geomType = MvtDecoder.GeomType.LINESTRING,
+          tags = mapOf("class" to highwayClass),
+          geometries = listOf(listOf(GeoPoint(lat, lon0), GeoPoint(lat, lon1))),
+        )
+      }
+    val layer = MvtDecoder.MvtLayer(name = "transportation", extent = 4096, features = features)
+    return MvtDecoder.MvtTile(z = z, x = x, y = y, layers = mapOf("transportation" to layer))
+  }
+
+  @Test
+  @Config(sdk = [36])
+  fun a_nineNeighbourZ14TilesTimes2000SegmentsProduce18000UniqueIds() {
+    val baseX = 9613
+    val baseY = 6757
+    val tiles =
+      (-1..1).flatMap { dy ->
+        (-1..1).map { dx ->
+          makeSyntheticMvtTile(z = 14, x = baseX + dx, y = baseY + dy, segmentCount = 2_000)
+        }
+      }
+    val graph =
+      TileRoadGraphSource.buildRoadGraphFromDecodedTiles(
+        tiles = tiles,
+        mode = TravelMode.DRIVING,
+        fetchedAtMs = 1_000L,
+        fromCache = false,
+      )
+    assertEquals(18_000, graph.ways.size)
+    assertEquals(18_000, graph.ways.keys.distinct().size)
+  }
+
+  @Test
+  @Config(sdk = [36])
+  fun b_tileAndLiveMapNamespacesNeverCollide() {
+    val idsTile = HashSet<Long>()
+    val idsMap = HashSet<Long>()
+    for (x in listOf(0, 9613, 16383)) {
+      for (y in listOf(0, 6757, 6758, 16383)) {
+        for (c in listOf(0L, 6L, 70L, 2000L)) {
+          val tId = TileRoadGraphSource.encodeWayId(TileRoadGraphSource.WAY_NS_TILES, 14, x, y, c)
+          val mId = TileRoadGraphSource.encodeWayId(TileRoadGraphSource.WAY_NS_MAP, 14, x, y, c)
+          assertTrue("Tile way ID must be negative", tId < 0L)
+          assertTrue("Map way ID must be negative", mId < 0L)
+          assertNotEquals(tId, mId)
+          idsTile += tId
+          idsMap += mId
+        }
+      }
+    }
+    assertTrue(idsTile.intersect(idsMap).isEmpty())
+
+    val tileGraph =
+      TileRoadGraphSource.buildRoadGraphFromDecodedTiles(
+        tiles = listOf(makeSyntheticMvtTile(14, 9613, 6757, 10)),
+        mode = TravelMode.DRIVING,
+        fetchedAtMs = 1_000L,
+        fromCache = false,
+      )
+    val bounds = TileRoadGraphSource.computeTileBounds(14, 9613, 6757)
+    val liveFeatures =
+      (0 until 10).map { i ->
+        val lat = bounds.south + (i + 1) * 0.0005
+        LiveMapVectorFeature(
+          layerName = "transportation",
+          tags = mapOf("class" to "primary"),
+          geometries = listOf(listOf(GeoPoint(lat, bounds.west + 0.001), GeoPoint(lat, bounds.west + 0.002))),
+        )
+      }
+    val mapGraph = TileRoadGraphSource.buildRoadGraphFromLiveFeatures(liveFeatures, TravelMode.DRIVING, fetchedAtMs = 1_000L)
+    assertTrue(tileGraph.ways.keys.intersect(mapGraph.ways.keys).isEmpty())
+  }
+
+  @Test
+  @Config(sdk = [36])
+  fun c_verticalNeighbourRegressionSegment70VsSegment6DistinctIds() {
+    val idTileASeg70 = TileRoadGraphSource.encodeWayId(TileRoadGraphSource.WAY_NS_TILES, 14, 9613, 6757, 70L)
+    val idTileBSeg6 = TileRoadGraphSource.encodeWayId(TileRoadGraphSource.WAY_NS_TILES, 14, 9613, 6758, 6L)
+    assertNotEquals(idTileASeg70, idTileBSeg6)
+
+    val tileA = makeSyntheticMvtTile(14, 9613, 6757, segmentCount = 75)
+    val tileB = makeSyntheticMvtTile(14, 9613, 6758, segmentCount = 10)
+    val gA = TileRoadGraphSource.buildRoadGraphFromDecodedTiles(listOf(tileA), TravelMode.DRIVING, 1_000L, false)
+    val gB = TileRoadGraphSource.buildRoadGraphFromDecodedTiles(listOf(tileB), TravelMode.DRIVING, 1_000L, false)
+    assertEquals(75, gA.ways.size)
+    assertEquals(10, gB.ways.size)
+    assertTrue("No ID collision between (9613,6757) and (9613,6758)", gA.ways.keys.intersect(gB.ways.keys).isEmpty())
+  }
+
+  @Test
+  @Config(sdk = [36])
+  fun d_publishingNineTileGraphsKeepsEveryWayWithZeroCollisionsAndDanglingRefs() {
+    val repo = RoadGraphRepository(maxMemoryTiles = 16)
+    val baseX = 9613
+    val baseY = 6757
+    val artifacts =
+      (-1..1).flatMap { dy ->
+        (-1..1).map { dx ->
+          val x = baseX + dx
+          val y = baseY + dy
+          val tile = makeSyntheticMvtTile(14, x, y, segmentCount = 25)
+          val g = TileRoadGraphSource.buildRoadGraphFromDecodedTiles(listOf(tile), TravelMode.DRIVING, 2_000L, false)
+          DecodedTileArtifact(
+            tileKey = "14_${x}_${y}",
+            z = 14,
+            x = x,
+            y = y,
+            bounds = TileRoadGraphSource.computeTileBounds(14, x, y),
+            graph = g,
+            labels = emptyList(),
+            pois = emptyList(),
+            fetchedAtMs = 2_000L,
+            isEmptyDecoded = false,
+          )
+        }
+      }
+
+    val expectedSum = artifacts.sumOf { it.graph.ways.size }
+    assertEquals(225, expectedSum)
+    val snap = repo.upsertDecodedArtifacts(artifacts)
+    assertEquals(expectedSum, snap.graph.ways.size)
+    assertEquals(0, snap.idCollisions)
+    assertEquals(0, snap.danglingNodeRefs)
+    assertTrue(
+      "Every nodeToWays list must be duplicate-free",
+      snap.graph.nodeToWays.values.all { list -> list.size == list.distinct().size },
+    )
+  }
+
+  @Test
+  @Config(sdk = [36])
+  fun e_roadCrossingTileBorderMatchesWithinTwoMetersOnBothSides() {
+    val pt = GeoPoint(30.0444, 31.2357)
+    val (tx, ty) = TileRoadGraphSource.latLonToTile(pt.lat, pt.lon, 14)
+
+    val pbfWest =
+      buildTestMvtTile(
+        layerTransTags = mapOf("class" to "primary"),
+        transCoords = listOf(1024 to 2048, 4096 to 2048),
+        layerNameTags = mapOf("class" to "primary", "name:en" to "Border Crossing Rd"),
+        nameCoords = listOf(1024 to 2048, 4096 to 2048),
+      )
+    val pbfEast =
+      buildTestMvtTile(
+        layerTransTags = mapOf("class" to "primary"),
+        transCoords = listOf(0 to 2048, 3072 to 2048),
+        layerNameTags = mapOf("class" to "primary", "name:en" to "Border Crossing Rd"),
+        nameCoords = listOf(0 to 2048, 3072 to 2048),
+      )
+
+    val tWest = MvtDecoder.decode(pbfWest, z = 14, x = tx, y = ty, layerFilter = setOf("transportation", "transportation_name"))
+    val tEast = MvtDecoder.decode(pbfEast, z = 14, x = tx + 1, y = ty, layerFilter = setOf("transportation", "transportation_name"))
+
+    val repo = RoadGraphRepository()
+    val gWest = TileRoadGraphSource.buildRoadGraphFromDecodedTiles(listOf(tWest), TravelMode.DRIVING, 1_000L, false)
+    val gEast = TileRoadGraphSource.buildRoadGraphFromDecodedTiles(listOf(tEast), TravelMode.DRIVING, 1_000L, false)
+    val snap =
+      repo.upsertTileGraphsBatch(
+        listOf(
+          RoadGraphRepository.TileBatchItem("14_${tx}_${ty}", TileRoadGraphSource.computeTileBounds(14, tx, ty), gWest, 1_000L, false),
+          RoadGraphRepository.TileBatchItem("14_${tx + 1}_${ty}", TileRoadGraphSource.computeTileBounds(14, tx + 1, ty), gEast, 1_000L, false),
+        ),
+      )
+    assertEquals(2, snap.graph.ways.size)
+    assertEquals(0, snap.idCollisions)
+
+    val westBorderPt = MvtDecoder.tilePxToGeoPoint(14, tx, ty, 3950, 2048, 4096)
+    val eastBorderPt = MvtDecoder.tilePxToGeoPoint(14, tx + 1, ty, 150, 2048, 4096)
+    val mWest = MapMatcher.match(snap.graph, westBorderPt, headingDeg = 90.0, mode = TravelMode.DRIVING, previousWayId = null, spatialIndex = snap.index, graphVersion = snap.version)
+    val mEast = MapMatcher.match(snap.graph, eastBorderPt, headingDeg = 90.0, mode = TravelMode.DRIVING, previousWayId = null, spatialIndex = snap.index, graphVersion = snap.version)
+
+    assertNotNull(mWest.primary)
+    assertNotNull(mEast.primary)
+    assertTrue("West side offset <= 2m (was ${mWest.primary!!.lateralOffsetMeters})", mWest.primary!!.lateralOffsetMeters <= 2.0)
+    assertTrue("East side offset <= 2m (was ${mEast.primary!!.lateralOffsetMeters})", mEast.primary!!.lateralOffsetMeters <= 2.0)
+  }
+
+  @Test
+  @Config(sdk = [36])
+  fun f_fallbackMergeAddsWaysWhenTileEdgesExistBeyond150mButNoneWithin150m() {
+    val userPt = GeoPoint(30.0444, 31.2357)
+    val distantTilePtA = GeoMath.offsetPoint(userPt, 0.0, 500.0)
+    val distantTilePtB = GeoMath.offsetPoint(distantTilePtA, 90.0, 120.0)
+    val tileWayId = TileRoadGraphSource.encodeWayId(TileRoadGraphSource.WAY_NS_TILES, 14, 9613, 6757, 1L)
+    val tileWay = OsmWay(tileWayId, listOf(-10L, -11L), listOf(distantTilePtA, distantTilePtB), OsmTags(highway = "primary", nameEn = "Distant Tile Rd"), source = GraphDataSource.TILES)
+    val tileGraph =
+      RoadGraph(
+        nodes = mapOf(-10L to OsmNode(-10L, distantTilePtA), -11L to OsmNode(-11L, distantTilePtB)),
+        ways = mapOf(tileWayId to tileWay),
+        nodeToWays = mapOf(-10L to listOf(tileWayId), -11L to listOf(tileWayId)),
+        fetchedAtMs = 1_000L,
+        fromCache = false,
+        source = GraphDataSource.TILES,
+      )
+
+    val repo = RoadGraphRepository()
+    repo.upsertTileGraph(
+      tileKey = "14_9613_6757",
+      bounds = TileRoadGraphSource.computeTileBounds(14, 9613, 6757),
+      tileGraph = tileGraph,
+      fetchedAtMs = 1_000L,
+      isEmptyDecoded = false,
+    )
+    repo.updateKeepWindow(userPt, 3000.0, setOf("14_9613_6757"))
+    val beforeFallback = repo.setMapFallbackGraph(null, evalCenter = userPt)
+    assertEquals(1, beforeFallback.graph.ways.size)
+    assertFalse(beforeFallback.hasPrimaryEdgeWithin150m)
+    assertFalse(beforeFallback.mapFallbackUsed)
+
+    val nearbyA = GeoMath.offsetPoint(userPt, 270.0, 50.0)
+    val nearbyB = GeoMath.offsetPoint(userPt, 90.0, 50.0)
+    val farFallbackA = GeoMath.offsetPoint(userPt, 180.0, 700.0)
+    val farFallbackB = GeoMath.offsetPoint(farFallbackA, 90.0, 80.0)
+    val mapGraph =
+      TileRoadGraphSource.buildRoadGraphFromLiveFeatures(
+        features =
+          listOf(
+            LiveMapVectorFeature("transportation", mapOf("class" to "secondary"), listOf(listOf(nearbyA, nearbyB), listOf(farFallbackA, farFallbackB))),
+            LiveMapVectorFeature("transportation_name", mapOf("class" to "secondary", "name:en" to "Fallback Local St"), listOf(listOf(nearbyA, nearbyB))),
+          ),
+        mode = TravelMode.DRIVING,
+        fetchedAtMs = 2_000L,
+      )
+
+    val mergedSnap = repo.setMapFallbackGraph(mapGraph, evalCenter = userPt)
+    assertTrue("Fallback must activate when primary edges are >150m away", mergedSnap.mapFallbackUsed)
+    assertEquals(1, mergedSnap.mapFallbackWaysAdded)
+    assertEquals(0, mergedSnap.idCollisions)
+    assertEquals(GraphDataSource.TILES, mergedSnap.graph.ways[tileWayId]?.source)
+    assertEquals(2, mergedSnap.graph.ways.size)
+
+    val match = MapMatcher.match(mergedSnap.graph, userPt, 90.0, TravelMode.DRIVING, previousWayId = null, spatialIndex = mergedSnap.index, graphVersion = mergedSnap.version)
+    assertNotNull(match.primary)
+    assertEquals(GraphDataSource.MAP, match.primary!!.way.source)
+    assertEquals("Fallback Local St", match.primary!!.name.english)
+  }
+
+  @Test
+  @Config(sdk = [36])
+  fun g_drivingWalkingSwitchReturnsSameGraphInstanceWithoutRefetchAndAppliesModeFilters() = runBlocking {
+    val userPt = GeoPoint(30.0444, 31.2357)
+    val (tx, ty) = TileRoadGraphSource.latLonToTile(userPt.lat, userPt.lon, 14)
+    val bounds = TileRoadGraphSource.computeTileBounds(14, tx, ty)
+    val midLat = (bounds.south + bounds.north) * 0.5
+    val midLon = (bounds.west + bounds.east) * 0.5
+    val testPt = GeoPoint(midLat, midLon)
+
+    val west = GeoMath.offsetPoint(testPt, 270.0, 120.0)
+    val east = GeoMath.offsetPoint(testPt, 90.0, 120.0)
+    val north = GeoMath.offsetPoint(testPt, 0.0, 100.0)
+    val userStart = GeoMath.offsetPoint(testPt, 270.0, 40.0)
+
+    val motorwayPts = listOf(west, testPt, east)
+    val footwayPts = listOf(west, testPt, east)
+    val branchWalkPts = listOf(testPt, north)
+
+    val mixedTile =
+      MvtDecoder.MvtTile(
+        z = 14,
+        x = tx,
+        y = ty,
+        layers =
+          mapOf(
+            "transportation" to
+              MvtDecoder.MvtLayer(
+                name = "transportation",
+                extent = 4096,
+                features =
+                  listOf(
+                    MvtDecoder.MvtFeature(1L, MvtDecoder.GeomType.LINESTRING, mapOf("class" to "motorway"), listOf(motorwayPts)),
+                    MvtDecoder.MvtFeature(2L, MvtDecoder.GeomType.LINESTRING, mapOf("class" to "path", "subclass" to "footway"), listOf(footwayPts)),
+                    MvtDecoder.MvtFeature(3L, MvtDecoder.GeomType.LINESTRING, mapOf("class" to "path", "subclass" to "footway"), listOf(branchWalkPts)),
+                  ),
+              ),
+            "transportation_name" to
+              MvtDecoder.MvtLayer(
+                name = "transportation_name",
+                extent = 4096,
+                features =
+                  listOf(
+                    MvtDecoder.MvtFeature(10L, MvtDecoder.GeomType.LINESTRING, mapOf("class" to "motorway", "name:en" to "Ring Motorway"), listOf(motorwayPts)),
+                    MvtDecoder.MvtFeature(11L, MvtDecoder.GeomType.LINESTRING, mapOf("class" to "path", "name:en" to "Park Walk"), listOf(footwayPts)),
+                  ),
+              ),
+          ),
+      )
+
+    // Graph contains ALL classes regardless of build mode
+    val builtDriving = TileRoadGraphSource.buildRoadGraphFromDecodedTiles(listOf(mixedTile), TravelMode.DRIVING, 1_000L, false)
+    assertEquals(3, builtDriving.ways.size)
+
+    val driveMatch = MapMatcher.match(builtDriving, userStart, 90.0, TravelMode.DRIVING, previousWayId = null)
+    assertNotNull(driveMatch.primary)
+    assertEquals("motorway", driveMatch.primary!!.way.tags.highway)
+    val driveAhead = AheadGraphAnalyzer.analyzeAheadDetailed(builtDriving, driveMatch.primary!!, TravelMode.DRIVING, 15.0)
+    assertTrue(
+      "Driving must filter out footway branches",
+      driveAhead.features.none { f -> f.branches.any { b -> b.osmTags.highway == "footway" } },
+    )
+
+    val walkMatch = MapMatcher.match(builtDriving, userStart, 90.0, TravelMode.WALKING, previousWayId = null)
+    assertNotNull(walkMatch.primary)
+    assertEquals("footway", walkMatch.primary!!.way.tags.highway)
+    val walkAhead = AheadGraphAnalyzer.analyzeAheadDetailed(builtDriving, walkMatch.primary!!, TravelMode.WALKING, 1.4)
+    assertTrue(
+      "Walking must see footway branch on same graph",
+      walkAhead.features.any { f -> f.branches.any { b -> b.osmTags.highway == "footway" } },
+    )
+
+    // ViewModel Driving <-> Walking switch keeps exact same RoadGraph object without refetching
+    val app = ApplicationProvider.getApplicationContext<Application>()
+    val vm = RoadAwarenessViewModel(app)
+    vm.setDebugNetworkSimulation(blockOverpass = true, blockTiles = true)
+    vm.setMockModeEnabled(true)
+    vm.onMapTappedInInspector(testPt)
+    vm.ingestLiveMapVectorFeatures(
+      features =
+        listOf(
+          LiveMapVectorFeature("transportation", mapOf("class" to "motorway"), listOf(motorwayPts)),
+          LiveMapVectorFeature("transportation", mapOf("class" to "path", "subclass" to "footway"), listOf(footwayPts)),
+          LiveMapVectorFeature("transportation_name", mapOf("class" to "motorway", "name:en" to "Ring Motorway"), listOf(motorwayPts)),
+          LiveMapVectorFeature("transportation_name", mapOf("class" to "path", "name:en" to "Park Walk"), listOf(footwayPts)),
+        ),
+      queriedCount = 4,
+    )
+    var deadline = System.currentTimeMillis() + 2_000L
+    while (vm.currentGraphSnapshot().graph.ways.isEmpty() && System.currentTimeMillis() < deadline) {
+      delay(25L)
+    }
+    val snapBefore = vm.currentGraphSnapshot()
+    assertTrue(snapBefore.graph.ways.size >= 2)
+
+    vm.setTravelMode(TravelMode.WALKING)
+    delay(200L)
+    val snapAfterWalk = vm.currentGraphSnapshot()
+    assertSame("Switching Driving -> Walking must return exact same RoadGraph object", snapBefore.graph, snapAfterWalk.graph)
+    assertEquals(snapBefore.version, snapAfterWalk.version)
+
+    vm.setTravelMode(TravelMode.DRIVING)
+    delay(200L)
+    val snapAfterDrive = vm.currentGraphSnapshot()
+    assertSame("Switching Walking -> Driving must return exact same RoadGraph object", snapBefore.graph, snapAfterDrive.graph)
+    assertEquals(snapBefore.version, snapAfterDrive.version)
   }
 
   // Minimal MVT protobuf v2 encoder for testing z14 `transportation` + `transportation_name` layers

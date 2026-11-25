@@ -13,21 +13,36 @@ import kotlin.math.abs
  */
 object GraphMerger {
 
-  fun merge(tileGraph: RoadGraph?, overpassGraph: RoadGraph?): RoadGraph? {
-    if (tileGraph == null && overpassGraph == null) return null
-    if (tileGraph == null) return overpassGraph
-    if (overpassGraph == null) return tileGraph
+  data class MergeStats(
+    val graph: RoadGraph?,
+    val idCollisions: Int = 0,
+    val danglingNodeRefs: Int = 0,
+  )
+
+  fun merge(tileGraph: RoadGraph?, overpassGraph: RoadGraph?): RoadGraph? =
+    mergeWithStats(tileGraph, overpassGraph).graph
+
+  fun mergeWithStats(tileGraph: RoadGraph?, overpassGraph: RoadGraph?): MergeStats {
+    if (tileGraph == null && overpassGraph == null) return MergeStats(null)
+    if (tileGraph == null) return MergeStats(overpassGraph)
+    if (overpassGraph == null) return MergeStats(tileGraph)
 
     val mergedNodes = HashMap<Long, OsmNode>(overpassGraph.nodes.size + tileGraph.nodes.size)
     val mergedWays = HashMap<Long, OsmWay>(overpassGraph.ways.size + tileGraph.ways.size)
     val nodeToWays = HashMap<Long, MutableList<Long>>(overpassGraph.nodes.size + tileGraph.nodes.size)
+    var idCollisions = 0
 
     // 1. Overpass ways always win
     mergedNodes.putAll(overpassGraph.nodes)
     for ((wId, way) in overpassGraph.ways) {
+      val prev = mergedWays[wId]
+      if (prev != null && prev.source != way.source) {
+        idCollisions++
+      }
       mergedWays[wId] = way
       for (nid in way.nodeIds.distinct()) {
-        nodeToWays.getOrPut(nid) { mutableListOf() }.add(wId)
+        val list = nodeToWays.getOrPut(nid) { ArrayList(3) }
+        if (wId !in list) list.add(wId)
       }
     }
 
@@ -36,6 +51,10 @@ object GraphMerger {
     var keptTileWays = 0
     for ((wId, tileWay) in tileGraph.ways) {
       if (isCoveredByOverpass(tileWay, overpassList)) continue
+      val prev = mergedWays[wId]
+      if (prev != null && prev.source != tileWay.source) {
+        idCollisions++
+      }
       keptTileWays++
       for (i in tileWay.nodeIds.indices) {
         val nid = tileWay.nodeIds[i]
@@ -46,7 +65,15 @@ object GraphMerger {
       }
       mergedWays[wId] = tileWay
       for (nid in tileWay.nodeIds.distinct()) {
-        nodeToWays.getOrPut(nid) { mutableListOf() }.add(wId)
+        val list = nodeToWays.getOrPut(nid) { ArrayList(3) }
+        if (wId !in list) list.add(wId)
+      }
+    }
+
+    var danglingNodeRefs = 0
+    for (list in nodeToWays.values) {
+      for (wId in list) {
+        if (wId !in mergedWays) danglingNodeRefs++
       }
     }
 
@@ -57,15 +84,17 @@ object GraphMerger {
         else -> tileGraph.source
       }
 
-    return RoadGraph(
-      nodes = mergedNodes,
-      ways = mergedWays,
-      nodeToWays = nodeToWays,
-      fetchedAtMs = maxOf(overpassGraph.fetchedAtMs, tileGraph.fetchedAtMs),
-      fromCache = overpassGraph.fromCache && tileGraph.fromCache,
-      source = combinedSource,
-      loadedTiles = tileGraph.loadedTiles,
-    )
+    val merged =
+      RoadGraph(
+        nodes = mergedNodes,
+        ways = mergedWays,
+        nodeToWays = nodeToWays,
+        fetchedAtMs = maxOf(overpassGraph.fetchedAtMs, tileGraph.fetchedAtMs),
+        fromCache = overpassGraph.fromCache && tileGraph.fromCache,
+        source = combinedSource,
+        loadedTiles = tileGraph.loadedTiles,
+      )
+    return MergeStats(graph = merged, idCollisions = idCollisions, danglingNodeRefs = danglingNodeRefs)
   }
 
   private fun isCoveredByOverpass(tileWay: OsmWay, overpassWays: List<OsmWay>): Boolean {

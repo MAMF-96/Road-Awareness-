@@ -41,6 +41,7 @@ import com.example.data.model.OffRoadState
 import com.example.data.model.OsmTags
 import com.example.data.model.OverpassEndpointTestResult
 import com.example.data.model.OverpassRequestLog
+import com.example.data.model.PanelStyle
 import com.example.data.model.PinSortOrder
 import com.example.data.model.PipelineDiagnostics
 import com.example.data.model.PipelineStageLine
@@ -107,6 +108,8 @@ data class RoadHudUiState(
   val lastConfirmedRoadName: BilingualName? = null,
   val tileFallbackRoad: TileRoadHint? = null,
   val roadNameSource: String = "none",
+  val needsMapFallbackWithin150m: Boolean = false,
+  val mapFallbackTriggerTick: Long = 0L,
   // Inspector & log diagnostics ONLY (never shown in main header/panel)
   val loadingStallReason: String? = null,
   val isOfflineCached: Boolean = false,
@@ -275,7 +278,12 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
   private var lastConfirmedRoadPoint: GeoPoint? = null
   private var overpassAutoRetryCount: Int = 0
   private var overpassAutoRetryCellKey: String? = null
+  @Volatile private var lastMapFeaturesQueriedCount: Int = 0
+  @Volatile private var lastFallbackTriggerPoint: GeoPoint? = null
   private val trailingBreadcrumbs = ArrayDeque<GeoPoint>()
+
+  internal fun currentGraphSnapshot(): RoadGraphRepository.GraphSnapshot =
+    roadGraphRepository.currentSnapshot()
 
   init {
     if (BuildConfig.DEBUG) {
@@ -366,7 +374,16 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
           ttsAnnouncer.stop()
         }
         if (modeChanged) {
-          _uiState.value.location?.let { onLocationUpdated(it, forceFetch = true) }
+          lastFetchMode = prefs.travelMode
+          val loc = _uiState.value.location
+          if (loc != null) {
+            val snap = roadGraphRepository.currentSnapshot()
+            if (snap.graph.ways.isNotEmpty()) {
+              runAnalysis(snap, loc, prefs.travelMode)
+            } else {
+              onLocationUpdated(loc, forceFetch = false)
+            }
+          }
         }
         refreshPipelineDiagnostics()
       }
@@ -450,13 +467,29 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
 
   fun setTravelMode(mode: TravelMode) {
     if (_uiState.value.travelMode == mode) return
-    _uiState.update { it.copy(travelMode = mode, selectedFeatureIndex = 1) }
-    viewModelScope.launch { settingsRepo.setTravelMode(mode) }
+    lastFetchMode = mode
     val loc = _uiState.value.location
+    val newLookahead =
+      AheadGraphAnalyzer.computeLookaheadMeters(
+        mode,
+        loc?.speedMps ?: 0.0,
+        _uiState.value.settings.horizonDistanceMeters,
+      )
+    _uiState.update {
+      it.copy(
+        travelMode = mode,
+        selectedFeatureIndex = 1,
+        lookaheadMeters = newLookahead,
+      )
+    }
+    viewModelScope.launch { settingsRepo.setTravelMode(mode) }
     if (loc != null) {
       val snap = roadGraphRepository.currentSnapshot()
-      if (snap.graph.ways.isNotEmpty()) runAnalysis(snap, loc, mode)
-      onLocationUpdated(loc, forceFetch = true)
+      if (snap.graph.ways.isNotEmpty()) {
+        runAnalysis(snap, loc, mode)
+      } else {
+        onLocationUpdated(loc, forceFetch = false)
+      }
     }
     if (rawSavedPins.isNotEmpty()) {
       refreshSavedPinsDistances(force = true)
@@ -1169,6 +1202,10 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
     viewModelScope.launch { settingsRepo.setTheme(pref) }
   }
 
+  fun setPanelStyle(style: PanelStyle) {
+    viewModelScope.launch { settingsRepo.setPanelStyle(style) }
+  }
+
   fun setUnitPreference(pref: UnitPreference) {
     val resolved = GeoMath.resolveEffectiveUnitSystem(pref)
     _uiState.update {
@@ -1252,6 +1289,8 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
       selectedOffRoadWayId = null
       selectedOffRoadForwardOverride = null
       lastConfirmedRoadPoint = null
+      lastMapFeaturesQueriedCount = 0
+      lastFallbackTriggerPoint = null
       trailingBreadcrumbs.clear()
       loadingOrFailureStartedMs = System.currentTimeMillis()
       _uiState.update {
@@ -1278,6 +1317,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
           dividedRoadRuleId = null,
           dividedRoadConfidence = 0.0,
           roadNameSource = "none",
+          needsMapFallbackWithin150m = false,
         )
       }
       refreshCacheCount()
@@ -1303,6 +1343,8 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
       selectedOffRoadWayId = null
       selectedOffRoadForwardOverride = null
       lastConfirmedRoadPoint = null
+      lastMapFeaturesQueriedCount = 0
+      lastFallbackTriggerPoint = null
       trailingBreadcrumbs.clear()
       _uiState.update {
         it.copy(
@@ -1323,6 +1365,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
           dividedRoadRuleId = null,
           dividedRoadConfidence = 0.0,
           roadNameSource = "none",
+          needsMapFallbackWithin150m = false,
         )
       }
       refreshCacheCount()
@@ -1775,26 +1818,39 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
       }
   }
 
-  fun ingestLiveMapVectorFeatures(features: List<LiveMapVectorFeature>) {
-    if (features.isEmpty()) return
+  fun ingestLiveMapVectorFeatures(
+    features: List<LiveMapVectorFeature>,
+    queriedCount: Int = features.size,
+  ) {
+    lastMapFeaturesQueriedCount = queriedCount.coerceAtLeast(features.size)
+    if (features.isEmpty()) {
+      refreshPipelineDiagnostics()
+      return
+    }
     val loc = _uiState.value.location ?: return
     val mode = _uiState.value.travelMode
     val currentSnap = roadGraphRepository.currentSnapshot()
-    val tilesNear = hasEdgesWithinRadius(currentSnap, loc.point, 150.0)
-    if (tilesNear && currentSnap.overpassCellCount > 0) return
+    if (hasPrimaryEdgesWithinRadius(currentSnap, loc.point, 150.0)) return
 
     viewModelScope.launch(Dispatchers.Default) {
       val mapGraph = TileRoadGraphSource.buildRoadGraphFromLiveFeatures(features, mode)
-      if (mapGraph.ways.isEmpty()) return@launch
-      val snap = roadGraphRepository.setMapFallbackGraph(mapGraph)
+      if (mapGraph.ways.isEmpty()) {
+        refreshPipelineDiagnostics()
+        return@launch
+      }
+      val snap = roadGraphRepository.setMapFallbackGraph(mapGraph, evalCenter = loc.point)
+      lastFallbackTriggerPoint = loc.point
+      val hasAnyNearby = hasEdgesWithinRadius(snap, loc.point, 150.0)
       val basicOnly = snap.overpassCellCount == 0
       _uiState.update {
         it.copy(
-          hasConfirmedGraphData = true,
-          isGraphErrorState = false,
-          roadDataFailedStage = null,
+          hasConfirmedGraphData = hasAnyNearby || snap.mapFallbackUsed || it.hasConfirmedGraphData,
+          isGraphErrorState = if (hasAnyNearby || snap.mapFallbackUsed) false else it.isGraphErrorState,
+          roadDataFailedStage = if (hasAnyNearby || snap.mapFallbackUsed) null else it.roadDataFailedStage,
           isUsingBasicTileData = basicOnly,
           isOfflineCached = snap.graph.fromCache && !isNetworkOnline(),
+          needsMapFallbackWithin150m = !snap.hasPrimaryEdgeWithin150m,
+          roadNameSource = if (snap.mapFallbackUsed && it.roadNameSource == "none") "map" else it.roadNameSource,
         )
       }
       runAnalysis(snap, loc, mode)
@@ -1805,6 +1861,13 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
   private fun hasEdgesWithinRadius(snap: RoadGraphRepository.GraphSnapshot, center: GeoPoint, radiusMeters: Double): Boolean =
     snap.index.queryWaysAround(center, radiusMeters).any { w ->
       w.points.size >= 2 && GeoMath.snapToPolyline(center, w.points).distanceMeters <= radiusMeters
+    }
+
+  private fun hasPrimaryEdgesWithinRadius(snap: RoadGraphRepository.GraphSnapshot, center: GeoPoint, radiusMeters: Double): Boolean =
+    snap.index.queryWaysAround(center, radiusMeters).any { w ->
+      w.source != GraphDataSource.MAP &&
+        w.points.size >= 2 &&
+        GeoMath.snapToPolyline(center, w.points).distanceMeters <= radiusMeters
     }
 
   private fun recordTrailingBreadcrumb(point: GeoPoint) {
@@ -1829,7 +1892,6 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
     val mode = _uiState.value.travelMode
     val horizonSetting = _uiState.value.settings.horizonDistanceMeters
     val lookahead = AheadGraphAnalyzer.computeLookaheadMeters(mode, snapshot.speedMps, horizonSetting)
-    _uiState.update { it.copy(location = snapshot, lookaheadMeters = lookahead) }
     recordTrailingBreadcrumb(snapshot.point)
 
     if (!snapshot.isMock) {
@@ -1840,7 +1902,27 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
       }
     }
 
-    val curSnap = roadGraphRepository.currentSnapshot()
+    val rawSnap = roadGraphRepository.currentSnapshot()
+    val reevaluatedSnap = roadGraphRepository.reevaluateFallbackForPosition(snapshot.point, minMoveMeters = 50.0)
+    val curSnap = reevaluatedSnap ?: rawSnap
+    val primaryNear150 = hasPrimaryEdgesWithinRadius(curSnap, snapshot.point, 150.0)
+    val movedFromFallbackTrigger =
+      lastFallbackTriggerPoint?.let { GeoMath.haversineMeters(it, snapshot.point) } ?: Double.MAX_VALUE
+    val shouldBumpFallback = !primaryNear150 && movedFromFallbackTrigger >= 50.0
+    if (shouldBumpFallback) {
+      lastFallbackTriggerPoint = snapshot.point
+    } else if (primaryNear150) {
+      lastFallbackTriggerPoint = null
+    }
+    _uiState.update {
+      it.copy(
+        location = snapshot,
+        lookaheadMeters = lookahead,
+        needsMapFallbackWithin150m = !primaryNear150,
+        mapFallbackTriggerTick = if (shouldBumpFallback) it.mapFallbackTriggerTick + 1 else it.mapFallbackTriggerTick,
+      )
+    }
+
     if (curSnap.graph.ways.isNotEmpty()) {
       runAnalysis(curSnap, snapshot, mode)
     } else {
@@ -1856,15 +1938,17 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
 
     val movedDist = lastFetchCenter?.let { GeoMath.haversineMeters(it, snapshot.point) } ?: Double.MAX_VALUE
     val headingDelta = lastFetchHeading?.let { GeoMath.absAngleDiff(it, snapshot.headingDeg) } ?: Double.MAX_VALUE
-    val modeChanged = lastFetchMode != mode
-    val isHeadingOnlyTurn = !forceFetch && !modeChanged && movedDist < 30.0
+    val isFirstFetch =
+      lastFetchCenter == null ||
+        (curSnap.graph.ways.isEmpty() && curSnap.memoryTileCount == 0 && curSnap.overpassCellCount == 0)
+    val isHeadingOnlyTurn = !forceFetch && movedDist < 30.0
     val shouldSkipCancelInitialFetch =
       isHeadingOnlyTurn &&
         curSnap.graph.ways.isEmpty() &&
         (tileFetchJob?.isActive == true || overpassFetchJob?.isActive == true)
 
     if (!shouldSkipCancelInitialFetch &&
-      (forceFetch || movedDist >= AppConfig.REFETCH_DISTANCE_METERS || headingDelta >= AppConfig.REFETCH_HEADING_DELTA_DEG || modeChanged)
+      (forceFetch || isFirstFetch || movedDist >= AppConfig.REFETCH_DISTANCE_METERS || headingDelta >= AppConfig.REFETCH_HEADING_DELTA_DEG)
     ) {
       // Never wipe active graph on movement; updateKeepWindow handles rolling eviction cleanly.
       startCorridorFetch(snapshot, mode, forceFetch, isHeadingOnlyTurn)
@@ -1975,7 +2059,14 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
                   )
                 }
 
-              val hasNearby = hasEdgesWithinRadius(newSnap, snapshot.point, 150.0)
+              val latestLoc = _uiState.value.location ?: snapshot
+              val hasNearby = hasEdgesWithinRadius(newSnap, latestLoc.point, 150.0)
+              val hasPrimaryNear150 = hasPrimaryEdgesWithinRadius(newSnap, latestLoc.point, 150.0)
+              if (!hasPrimaryNear150) {
+                lastFallbackTriggerPoint = latestLoc.point
+              } else {
+                lastFallbackTriggerPoint = null
+              }
               val basicOnly = newSnap.overpassCellCount == 0 && (overpassFailedForArea || _uiState.value.isLoadingGraph)
               val allTilesDone = !update.isPartialOrStale
               _uiState.update {
@@ -1987,10 +2078,11 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
                   roadDataFailedStage = if (hasNearby) null else it.roadDataFailedStage,
                   isUsingBasicTileData = basicOnly,
                   isOfflineCached = newSnap.graph.fromCache && !isNetworkOnline(),
+                  needsMapFallbackWithin150m = !hasPrimaryNear150,
+                  mapFallbackTriggerTick = if (!hasPrimaryNear150) it.mapFallbackTriggerTick + 1 else it.mapFallbackTriggerTick,
                 )
               }
               refreshCacheCount()
-              val latestLoc = _uiState.value.location ?: snapshot
               runAnalysis(newSnap, latestLoc, mode)
               rebuildDebugEdges(newSnap)
             },
@@ -2004,12 +2096,19 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
         }
 
         val postSnap = roadGraphRepository.currentSnapshot()
-        val postNearby = hasEdgesWithinRadius(postSnap, snapshot.point, 150.0)
+        val latestPostLoc = _uiState.value.location ?: snapshot
+        val postNearby = hasEdgesWithinRadius(postSnap, latestPostLoc.point, 150.0)
+        val postPrimaryNear150 = hasPrimaryEdgesWithinRadius(postSnap, latestPostLoc.point, 150.0)
+        if (!postPrimaryNear150) {
+          lastFallbackTriggerPoint = latestPostLoc.point
+        }
         _uiState.update {
           it.copy(
             isLoadingGraph = if (postNearby || hadNearbyBefore || tileFailedForArea) false else it.isLoadingGraph,
             isUpdatingStaleData = false,
             hasConfirmedGraphData = postNearby || it.hasConfirmedGraphData,
+            needsMapFallbackWithin150m = !postPrimaryNear150,
+            mapFallbackTriggerTick = if (!postPrimaryNear150) it.mapFallbackTriggerTick + 1 else it.mapFallbackTriggerTick,
           )
         }
         refreshCacheCount()
@@ -2050,6 +2149,8 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
                 if (online && update.isFromNetwork) {
                   offlineStartedMs = 0L
                 }
+                val latestLoc = _uiState.value.location ?: snapshot
+                val hasPrimaryNear150 = hasPrimaryEdgesWithinRadius(newSnap, latestLoc.point, 150.0)
                 _uiState.update {
                   it.copy(
                     isLoadingGraph = update.isPartialOrStale && !hadNearbyBefore,
@@ -2064,10 +2165,10 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
                     loadingStallReason = if (freshComplete) null else it.loadingStallReason,
                     isOfflineCached = newSnap.graph.fromCache && !online,
                     networkError = null,
+                    needsMapFallbackWithin150m = !hasPrimaryNear150,
                   )
                 }
                 refreshCacheCount()
-                val latestLoc = _uiState.value.location ?: snapshot
                 runAnalysis(newSnap, latestLoc, mode)
                 rebuildDebugEdges(newSnap)
               },
@@ -2416,6 +2517,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
               activeWay?.source == GraphDataSource.TILES -> "tiles"
               activeWay?.source == GraphDataSource.MAP -> "map"
               activeWay?.source == GraphDataSource.OVERPASS -> "overpass"
+              snap.mapFallbackUsed -> "map"
               snap.tileEdgeCount > 0 && snap.overpassEdgeCount > 0 -> "merged"
               snap.tileEdgeCount > 0 -> "tiles"
               snap.overpassEdgeCount > 0 -> "overpass"
@@ -2525,6 +2627,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
     val g = snap.graph
 
     val localStats = if (pt != null) snap.index.computeLocalStats(pt) else null
+    val edges150 = localStats?.edges150 ?: 0
     val edges500 = localStats?.edges500 ?: 0
     val nodes500 = localStats?.nodes500 ?: 0
     val edges1500 = localStats?.edges1500 ?: 0
@@ -2599,16 +2702,19 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
         reason = decodeInfo.errorReason,
         isEmptyArea = isEmptyArea,
       )
-    val graphOk = edges1500 > 0
+    val graphIntegrityOk = snap.idCollisions == 0 && snap.danglingNodeRefs == 0
+    val graphOk = edges1500 > 0 && graphIntegrityOk
+    val avgPerTileStr = String.format(Locale.US, "%.1f", snap.waysPerTileAvg)
     val stageD =
       PipelineStageLine(
         stageId = "d",
         label = "Graph build",
-        ok = graphOk || isEmptyArea,
-        summary = "v${snap.version} 500m:${nodes500}n/${edges500}e 1.5km:${nodes1500}n/${edges1500}e bbox=$tileBoundsStr $nearestStr",
+        ok = graphOk || (isEmptyArea && graphIntegrityOk),
+        summary = "v${snap.version} ways=${g.ways.size} tile=${snap.waysPerTileMin}/$avgPerTileStr/${snap.waysPerTileMax} col=${snap.idCollisions} dang=${snap.danglingNodeRefs} 150m:${edges150}e 500m:${nodes500}n/${edges500}e 1.5km:${edges1500}e bbox=$tileBoundsStr $nearestStr",
         reason = when {
+          !graphIntegrityOk -> "col=${snap.idCollisions} dang=${snap.danglingNodeRefs}"
           isEmptyArea -> "empty area"
-          !graphOk && tileFailedForArea -> "no decoded edges near user"
+          edges1500 == 0 && tileFailedForArea -> "no decoded edges near user"
           else -> null
         },
         isEmptyArea = isEmptyArea,
@@ -2688,11 +2794,18 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
         ok = true,
         summary = "$posTag script=$script units=${state.effectiveUnitSystem.name} ($devLocale)",
       )
+    val stageI =
+      PipelineStageLine(
+        stageId = "i",
+        label = "Map fallback",
+        ok = true,
+        summary = "used=${if (snap.mapFallbackUsed) "yes" else "no"} ways=${snap.mapFallbackWaysAdded} queried=$lastMapFeaturesQueriedCount",
+      )
 
-    val stages = listOf(stageA, stageB, stageC, stageD, stageE, stageF, stageG, stageH)
+    val stages = listOf(stageA, stageB, stageC, stageD, stageE, stageF, stageG, stageH, stageI)
     // Stage e (Overpass) must never make overall tile-backed graph red when stage d already succeeded
     val firstFailing =
-      if (graphOk || isEmptyArea) {
+      if (graphOk || (isEmptyArea && graphIntegrityOk)) {
         null
       } else {
         listOf(stageA, stageB, stageC, stageD).firstOrNull { !it.ok && !it.isEmptyArea }?.label
@@ -2742,6 +2855,8 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
             graphVersion = snap.version,
             rollingWindowSummary = rollingSummary,
             horizonStatsSummary = horizonSummary,
+            idCollisions = snap.idCollisions,
+            danglingNodeRefs = snap.danglingNodeRefs,
           ),
       )
     }

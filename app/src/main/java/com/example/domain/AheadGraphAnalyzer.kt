@@ -31,7 +31,9 @@ import kotlin.math.min
 
 object AheadGraphAnalyzer {
   private val WALKING_PATH_HIGHWAYS = setOf("footway", "path", "pedestrian", "steps")
-  private val NON_DRIVING_HIGHWAYS = setOf("footway", "path", "pedestrian", "steps", "cycleway")
+  private val NON_DRIVING_HIGHWAYS =
+    setOf("footway", "path", "pedestrian", "steps", "cycleway", "corridor", "raceway", "bus_guideway")
+  private val NON_WALKING_HIGHWAYS = setOf("motorway", "motorway_link", "raceway", "bus_guideway")
   private val IGNORED_DRIVING_SERVICES = setOf("driveway", "parking_aisle", "drive-through")
   private val LINK_HIGHWAYS =
     setOf("motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link")
@@ -1091,12 +1093,11 @@ object AheadGraphAnalyzer {
     return hw == "construction" || acc == "no"
   }
 
-  private fun isRelevantForMode(way: OsmWay, mode: TravelMode): Boolean {
-    val hw = way.tags.highway?.lowercase() ?: return false
-    return if (mode == TravelMode.DRIVING) {
-      hw !in NON_DRIVING_HIGHWAYS
-    } else {
-      true
+  internal fun isRelevantForMode(way: OsmWay, mode: TravelMode): Boolean {
+    val hw = way.tags.highway?.lowercase()?.trim() ?: return false
+    return when (mode) {
+      TravelMode.DRIVING -> hw !in NON_DRIVING_HIGHWAYS
+      TravelMode.WALKING -> hw !in NON_WALKING_HIGHWAYS
     }
   }
 

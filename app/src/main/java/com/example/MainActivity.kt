@@ -12,19 +12,15 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.DeveloperOrientation
-import com.example.data.model.ThemePreference
 import com.example.ui.RoadAwarenessViewModel
 import com.example.ui.components.TouchTelemetry
 import com.example.ui.components.ensureMapLibreInitialized
@@ -49,19 +45,15 @@ class MainActivity : ComponentActivity() {
   @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
-    val initialDark =
-      (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-        Configuration.UI_MODE_NIGHT_YES
-    val initialStyle =
-      if (initialDark) SystemBarStyle.dark(Color.TRANSPARENT)
-      else SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
-    enableEdgeToEdge(statusBarStyle = initialStyle, navigationBarStyle = initialStyle)
+    val alwaysLightIconsBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
+    enableEdgeToEdge(
+      statusBarStyle = alwaysLightIconsBarStyle,
+      navigationBarStyle = alwaysLightIconsBarStyle,
+    )
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
       window.isNavigationBarContrastEnforced = false
     }
-    val initialBgColor =
-      if (initialDark) RoadColors.DarkBackground.toArgb() else RoadColors.LightBackground.toArgb()
-    window.setBackgroundDrawable(ColorDrawable(initialBgColor))
+    window.setBackgroundDrawable(ColorDrawable(RoadColors.DarkBackground.toArgb()))
     ensureMapLibreInitialized(applicationContext)
 
     setContent {
@@ -69,27 +61,6 @@ class MainActivity : ComponentActivity() {
       val rev = configRevision
       val windowSizeClass = calculateWindowSizeClass(this)
       val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-      val sysDark = isSystemInDarkTheme()
-      val useDark =
-        when (uiState.settings.themePreference) {
-          ThemePreference.AUTO -> sysDark
-          ThemePreference.LIGHT -> false
-          ThemePreference.DARK -> true
-        }
-
-      var appliedDark by remember { mutableStateOf(initialDark) }
-      LaunchedEffect(useDark) {
-        if (appliedDark != useDark) {
-          appliedDark = useDark
-          val barStyle =
-            if (useDark) SystemBarStyle.dark(Color.TRANSPARENT)
-            else SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
-          enableEdgeToEdge(statusBarStyle = barStyle, navigationBarStyle = barStyle)
-          val bgColor =
-            if (useDark) RoadColors.DarkBackground.toArgb() else RoadColors.LightBackground.toArgb()
-          window.setBackgroundDrawable(ColorDrawable(bgColor))
-        }
-      }
 
       if (BuildConfig.DEBUG) {
         LaunchedEffect(uiState.settings.developerOrientation) {
@@ -105,7 +76,10 @@ class MainActivity : ComponentActivity() {
         }
       }
 
-      RoadAwarenessTheme(themePreference = uiState.settings.themePreference) {
+      RoadAwarenessTheme(
+        themePreference = uiState.settings.themePreference,
+        panelStyle = uiState.settings.panelStyle,
+      ) {
         RoadAwarenessScreen(
           viewModel = viewModel,
           windowSizeClass = windowSizeClass,

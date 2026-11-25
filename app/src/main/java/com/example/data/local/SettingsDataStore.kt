@@ -11,6 +11,7 @@ import com.example.BuildConfig
 import com.example.config.AppConfig
 import com.example.data.model.DeveloperOrientation
 import com.example.data.model.LandscapePanelSide
+import com.example.data.model.PanelStyle
 import com.example.data.model.TestSpot
 import com.example.data.model.ThemePreference
 import com.example.data.model.TravelMode
@@ -24,6 +25,7 @@ private val Context.settingsDataStore by preferencesDataStore(name = "road_aware
 
 data class UserSettings(
   val themePreference: ThemePreference = ThemePreference.AUTO,
+  val panelStyle: PanelStyle = PanelStyle.ALWAYS_DARK,
   val unitPreference: UnitPreference = UnitPreference.AUTO,
   val arabicTtsEnabled: Boolean = false,
   val travelMode: TravelMode = TravelMode.DRIVING,
@@ -52,6 +54,7 @@ data class UserSettings(
 
 class SettingsRepository(private val context: Context) {
   private val keyTheme = stringPreferencesKey("theme_preference")
+  private val keyPanelStyle = stringPreferencesKey("panel_style")
   private val keyUnitPref = stringPreferencesKey("unit_preference")
   private val keyArabicTts = booleanPreferencesKey("arabic_tts_enabled")
   private val keyTravelMode = stringPreferencesKey("travel_mode")
@@ -82,6 +85,9 @@ class SettingsRepository(private val context: Context) {
       val theme =
         runCatching { ThemePreference.valueOf(prefs[keyTheme] ?: ThemePreference.AUTO.name) }
           .getOrDefault(ThemePreference.AUTO)
+      val panelStyle =
+        runCatching { PanelStyle.valueOf(prefs[keyPanelStyle] ?: PanelStyle.ALWAYS_DARK.name) }
+          .getOrDefault(PanelStyle.ALWAYS_DARK)
       val unitPref =
         runCatching { UnitPreference.valueOf(prefs[keyUnitPref] ?: UnitPreference.AUTO.name) }
           .getOrDefault(UnitPreference.AUTO)
@@ -104,6 +110,7 @@ class SettingsRepository(private val context: Context) {
         }
       UserSettings(
         themePreference = theme,
+        panelStyle = panelStyle,
         unitPreference = unitPref,
         arabicTtsEnabled = prefs[keyArabicTts] ?: false,
         travelMode = mode,
@@ -135,6 +142,10 @@ class SettingsRepository(private val context: Context) {
 
   suspend fun setTheme(theme: ThemePreference) {
     context.settingsDataStore.edit { it[keyTheme] = theme.name }
+  }
+
+  suspend fun setPanelStyle(style: PanelStyle) {
+    context.settingsDataStore.edit { it[keyPanelStyle] = style.name }
   }
 
   suspend fun setUnitPreference(pref: UnitPreference) {

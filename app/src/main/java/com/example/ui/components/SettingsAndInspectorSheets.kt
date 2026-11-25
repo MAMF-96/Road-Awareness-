@@ -114,6 +114,7 @@ import com.example.data.model.DeveloperOrientation
 import com.example.data.model.FeatureCensusEntry
 import com.example.data.model.FeatureType
 import com.example.data.model.LandscapePanelSide
+import com.example.data.model.PanelStyle
 import com.example.data.model.RelativeDirection
 import com.example.data.model.TestSpot
 import com.example.data.model.ThemePreference
@@ -135,6 +136,7 @@ import kotlinx.coroutines.delay
 fun SettingsBottomSheet(
   uiState: RoadHudUiState,
   onSelectTheme: (ThemePreference) -> Unit,
+  onSelectPanelStyle: (PanelStyle) -> Unit = {},
   onToggleExperimentalBlur: (Boolean) -> Unit,
   onToggleReduceTransparency: (Boolean) -> Unit,
   onToggleArabicTts: (Boolean) -> Unit,
@@ -207,6 +209,30 @@ fun SettingsBottomSheet(
             selected = uiState.settings.themePreference == ThemePreference.DARK,
             onClick = { onSelectTheme(ThemePreference.DARK) },
             modifier = Modifier.weight(1f).testTag("theme_dark_chip"),
+          )
+        }
+
+        Text(
+          text = stringResource(R.string.settings_panel_style),
+          fontSize = 14.sp,
+          fontWeight = FontWeight.Medium,
+          color = MaterialTheme.colorScheme.onSurface,
+        )
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          ThemeOptionChip(
+            label = stringResource(R.string.panel_style_always_dark),
+            selected = uiState.settings.panelStyle == PanelStyle.ALWAYS_DARK,
+            onClick = { onSelectPanelStyle(PanelStyle.ALWAYS_DARK) },
+            modifier = Modifier.weight(1f).testTag("panel_style_always_dark_chip"),
+          )
+          ThemeOptionChip(
+            label = stringResource(R.string.panel_style_follow_map),
+            selected = uiState.settings.panelStyle == PanelStyle.FOLLOW_MAP,
+            onClick = { onSelectPanelStyle(PanelStyle.FOLLOW_MAP) },
+            modifier = Modifier.weight(1f).testTag("panel_style_follow_map_chip"),
           )
         }
 
@@ -1305,6 +1331,13 @@ fun GraphInspectorBottomSheet(
                       append("${st.stageId}$icon")
                     }
                   }
+                  val colCount = uiState.pipelineDiagnostics.idCollisions
+                  val dangCount = uiState.pipelineDiagnostics.danglingNodeRefs
+                  val integrityTint =
+                    if (colCount == 0 && dangCount == 0) roadColors.openText else roadColors.blockedText
+                  withStyle(SpanStyle(color = integrityTint, fontWeight = FontWeight.Bold)) {
+                    append(" | col=$colCount dang=$dangCount")
+                  }
                 }
               Text(
                 text = summaryAnnotated,
@@ -1368,7 +1401,7 @@ fun GraphInspectorBottomSheet(
                   verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
                   Text(
-                    text = "Pipeline (a–h) · v${uiState.pipelineDiagnostics.graphVersion} · ${uiState.pipelineDiagnostics.nearestEdgeSummary}",
+                    text = "Pipeline (a–i) · v${uiState.pipelineDiagnostics.graphVersion} · ${uiState.pipelineDiagnostics.nearestEdgeSummary}",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary,

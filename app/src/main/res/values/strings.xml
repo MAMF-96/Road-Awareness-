@@ -142,10 +142,13 @@
 
     <!-- Settings & Graph Inspector -->
     <string name="settings_title">Settings</string>
-    <string name="settings_theme">Appearance</string>
+    <string name="settings_theme">Map style</string>
     <string name="theme_auto">Auto</string>
     <string name="theme_light">Light</string>
-    <string name="theme_dark">Night</string>
+    <string name="theme_dark">Dark</string>
+    <string name="settings_panel_style">Panel style</string>
+    <string name="panel_style_always_dark">Always dark</string>
+    <string name="panel_style_follow_map">Follow map</string>
     <string name="settings_units">Units</string>
     <string name="units_auto">Auto</string>
     <string name="units_metric">Metric</string>

@@ -44,6 +44,7 @@ class SpatialGraphIndex private constructor(
     val nodes1500: Int,
     val edges1500: Int,
     val nearest: NearestWayHit?,
+    val edges150: Int = 0,
   )
 
   fun queryWaysAround(center: GeoPoint, radiusMeters: Double): List<OsmWay> {
@@ -136,6 +137,7 @@ class SpatialGraphIndex private constructor(
       }
     }
 
+    var edges150 = 0
     var edges500 = 0
     var edges1500 = 0
     var nearest: NearestWayHit? = null
@@ -143,6 +145,7 @@ class SpatialGraphIndex private constructor(
     for (way in ways1500) {
       if (way.points.size < 2) continue
       val snap = GeoMath.snapToPolyline(center, way.points)
+      if (snap.distanceMeters <= 150.0) edges150++
       if (snap.distanceMeters <= 500.0) edges500++
       if (snap.distanceMeters <= 1500.0) edges1500++
       if (nearest == null || snap.distanceMeters < nearest.distanceMeters) {
@@ -161,6 +164,7 @@ class SpatialGraphIndex private constructor(
       nodes1500 = nodes1500,
       edges1500 = edges1500,
       nearest = nearest,
+      edges150 = edges150,
     )
   }
 
