@@ -85,9 +85,11 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
 import com.example.R
+import com.example.data.model.ChaseCameraDistance
 import com.example.data.model.DeveloperOrientation
 import com.example.data.model.FeatureCensusEntry
 import com.example.data.model.FoundRoadMatch
+import com.example.data.model.LadderOrder
 import com.example.data.model.LandscapePanelSide
 import com.example.data.model.PanelStyle
 import com.example.data.model.SavedPin
@@ -210,7 +212,10 @@ fun RoadAwarenessScreen(
   val effectiveReduceTransparency =
     uiState.settings.reduceTransparencyEnabled || systemReduceTransparency || jankFallbackActive
   val experimentalBlurRequested =
-    Build.VERSION.SDK_INT >= 31 && uiState.settings.experimentalBlurEnabled && !effectiveReduceTransparency
+    Build.VERSION.SDK_INT >= 31 &&
+      uiState.settings.experimentalBlurEnabled &&
+      !effectiveReduceTransparency &&
+      !uiState.settings.performanceModeEnabled
 
   LaunchedEffect(experimentalBlurRequested) {
     if (!experimentalBlurRequested) return@LaunchedEffect
@@ -350,6 +355,10 @@ fun RoadAwarenessScreen(
     onSelectHorizon = { viewModel.setHorizonDistanceMeters(it) },
     onToggleShowMinorJunctions = { viewModel.setShowMinorJunctions(it) },
     onToggleLandmarksAhead = { viewModel.setLandmarksAheadEnabled(it) },
+    onSelectLadderOrder = { viewModel.setLadderOrder(it) },
+    onToggleChaseCamera = { viewModel.setChaseCameraEnabled(it) },
+    onSelectChaseCameraDistance = { viewModel.setChaseCameraDistance(it) },
+    onTogglePerformanceMode = { viewModel.setPerformanceModeEnabled(it) },
     onToggleOverview = { viewModel.toggleOverviewMode() },
     onToggleShowGraphEdges = { viewModel.setShowGraphEdges(it) },
     onReportCopied = {
@@ -470,6 +479,10 @@ fun RoadAwarenessScreenContent(
   onSelectHorizon: (Double) -> Unit = {},
   onToggleShowMinorJunctions: (Boolean) -> Unit = {},
   onToggleLandmarksAhead: (Boolean) -> Unit = {},
+  onSelectLadderOrder: (LadderOrder) -> Unit = {},
+  onToggleChaseCamera: (Boolean) -> Unit = {},
+  onSelectChaseCameraDistance: (ChaseCameraDistance) -> Unit = {},
+  onTogglePerformanceMode: (Boolean) -> Unit = {},
   onToggleOverview: () -> Unit = {},
   onToggleShowGraphEdges: (Boolean) -> Unit = {},
   onReportCopied: () -> Unit = {},
@@ -1324,6 +1337,10 @@ fun RoadAwarenessScreenContent(
           onSelectHorizon = onSelectHorizon,
           onToggleShowMinorJunctions = onToggleShowMinorJunctions,
           onToggleLandmarksAhead = onToggleLandmarksAhead,
+          onSelectLadderOrder = onSelectLadderOrder,
+          onToggleChaseCamera = onToggleChaseCamera,
+          onSelectChaseCameraDistance = onSelectChaseCameraDistance,
+          onTogglePerformanceMode = onTogglePerformanceMode,
           onToggleShowGraphEdges = onToggleShowGraphEdges,
           onResetDebugOverrides = onResetDebugOverrides,
           onClearCache = onClearCache,

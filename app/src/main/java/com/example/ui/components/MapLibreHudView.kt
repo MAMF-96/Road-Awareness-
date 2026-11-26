@@ -44,6 +44,8 @@ import com.example.data.model.TravelMode
 import com.example.data.remote.DarkMapStyleGenerator
 import com.example.data.remote.DebugNetworkSimulator
 import com.example.domain.GeoMath
+import com.example.ui.ChaseCameraPose
+import com.example.ui.ChaseCameraSmoother
 import com.example.ui.RoadHudUiState
 import com.example.ui.theme.RoadColors
 import com.example.ui.theme.resolveIsMapDark
@@ -64,6 +66,7 @@ import org.maplibre.android.maps.Style
 import org.maplibre.android.module.http.HttpRequestUtil
 import org.maplibre.android.style.expressions.Expression
 import org.maplibre.android.style.layers.CircleLayer
+import org.maplibre.android.style.layers.FillExtrusionLayer
 import org.maplibre.android.style.layers.FillLayer
 import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
@@ -103,6 +106,7 @@ private const val LYR_FOUND_PIN = "lyr_found_pin"
 private const val LYR_CONE = "lyr_user_cone"
 private const val LYR_USER_HALO = "lyr_user_halo"
 private const val LYR_USER_DOT = "lyr_user_dot"
+private const val LYR_USER_CHEVRON = "lyr_user_chevron"
 private const val LYR_USER_MOCK_BADGE = "lyr_user_mock_badge"
 private const val LYR_STUBS_CASING = "lyr_selected_stubs_casing"
 private const val LYR_STUBS = "lyr_selected_stubs"
@@ -113,6 +117,7 @@ private const val LYR_ROUTE = "lyr_explicit_route"
 private const val LYR_LANDMARKS = "lyr_landmarks_ahead"
 private const val LYR_PINS = "lyr_feature_pins"
 private const val IMG_MOCK_LOCK = "img_user_mock_lock"
+private const val IMG_USER_CHEVRON = "img_user_chevron"
 
 private val mapLibreInitialized = java.util.concurrent.atomic.AtomicBoolean(false)
 
@@ -239,6 +244,8 @@ private fun MapLibreHudViewInternal(
   var hasResumed by remember { mutableStateOf(false) }
   var mapSizePx by remember { mutableStateOf(IntSize.Zero) }
   var cameraIdleTick by remember { mutableIntStateOf(0) }
+  val chaseSmoother = remember { ChaseCameraSmoother() }
+  var lastChasePose by remember { mutableStateOf<ChaseCameraPose?>(null) }
 
   fun pauseAndStopMapView(mv: MapView) {
     if (isMapDestroyed || mv.isDestroyed) return
@@ -333,6 +340,7 @@ private fun MapLibreHudViewInternal(
     mapView.getMapAsync { map ->
       if (isMapDestroyed || mapView.isDestroyed) return@getMapAsync
       mapInstance = map
+      map.setMaxPitchPreference(60.0)
       map.uiSettings.apply {
         isCompassEnabled = false
         isLogoEnabled = false
@@ -441,7 +449,13 @@ private fun MapLibreHudViewInternal(
         }
         setupHudLayers(style)
         loadedStyle = style
-        syncHudLayers(context, style, currentUiState, isMapDark = darkTheme)
+        syncHudLayers(
+          context = context,
+          style = style,
+          uiState = currentUiState,
+          isMapDark = darkTheme,
+          chasePose = lastChasePose,
+        )
         if (liveCam.target != null) {
           map.moveCamera(CameraUpdateFactory.newCameraPosition(liveCam))
         }
@@ -564,12 +578,24 @@ private fun MapLibreHudViewInternal(
     uiState.debugGraphEdges,
     uiState.settings.showGraphEdges,
     uiState.settings.landmarksAheadEnabled,
+    uiState.settings.chaseCameraEnabled,
+    uiState.settings.chaseCameraDistance,
+    uiState.settings.performanceModeEnabled,
+    uiState.travelMode,
+    lastChasePose,
   ) {
     if (isMapDestroyed || mapView.isDestroyed) return@LaunchedEffect
     val map = mapInstance ?: return@LaunchedEffect
     val style = map.style ?: return@LaunchedEffect
     if (style !== loadedStyle || !style.isFullyLoaded) return@LaunchedEffect
-    syncHudLayers(context, style, uiState, isMapDark = isMapDark, isPanelExpanded = isPanelExpanded)
+    syncHudLayers(
+      context = context,
+      style = style,
+      uiState = uiState,
+      isMapDark = isMapDark,
+      isPanelExpanded = isPanelExpanded,
+      chasePose = lastChasePose,
+    )
     currentOnTileRoadHintChanged(null)
   }
 
@@ -620,11 +646,11 @@ private fun MapLibreHudViewInternal(
               else -> emptyList()
             }
           if (lines.isEmpty()) continue
-          val nearEnough =
-            lines.any { line ->
-              line.any { pt -> GeoMath.haversineMeters(latestLoc.point, pt) <= 1_800.0 }
+          val localLines =
+            lines.filter { line ->
+              line.any { pt -> GeoMath.haversineMeters(latestLoc.point, pt) <= 2_500.0 }
             }
-          if (!nearEnough) continue
+          if (localLines.isEmpty()) continue
           val tags = mutableMapOf<String, String>()
           val props = feature.properties()
           if (props != null) {
@@ -634,7 +660,7 @@ private fun MapLibreHudViewInternal(
               }
             }
           }
-          extracted += LiveMapVectorFeature(layerName = layerName, tags = tags, geometries = lines)
+          extracted += LiveMapVectorFeature(layerName = layerName, tags = tags, geometries = localLines)
           if (extracted.size >= 400) break
         }
         if (extracted.size >= 400) break
@@ -651,6 +677,8 @@ private fun MapLibreHudViewInternal(
 
   var lastAppliedPad by remember { mutableStateOf(listOf(0f, 0f, 0f, 0f)) }
   var lastCameraMoveMs by remember { mutableLongStateOf(0L) }
+  var lastChaseSettingsKey by remember { mutableStateOf<Pair<Boolean, Any>?>(null) }
+  var lastRecenterSignal by remember { mutableIntStateOf(uiState.recenterSignal) }
 
   LaunchedEffect(
     mapInstance,
@@ -661,6 +689,11 @@ private fun MapLibreHudViewInternal(
     uiState.isFollowingUser,
     uiState.recenterSignal,
     uiState.travelMode,
+    uiState.settings.chaseCameraEnabled,
+    uiState.settings.chaseCameraDistance,
+    uiState.corridorWorldPoints,
+    uiState.matchResult,
+    uiState.isOverviewMode,
     mapSizePx,
     isLandscape,
     cameraPaddingTopPx,
@@ -681,14 +714,40 @@ private fun MapLibreHudViewInternal(
       lastAppliedPad = curPad
     }
 
+    val curChaseKey = uiState.settings.chaseCameraEnabled to uiState.settings.chaseCameraDistance
+    val chaseSettingChanged = curChaseKey != lastChaseSettingsKey
+    if (chaseSettingChanged) lastChaseSettingsKey = curChaseKey
+    val recenterChanged = uiState.recenterSignal != lastRecenterSignal
+    if (recenterChanged) lastRecenterSignal = uiState.recenterSignal
+
+    val effectivePoint = uiState.displayLocationPoint ?: loc.point
+    val effectiveHeading = uiState.displayHeadingDeg ?: loc.headingDeg
+    val now = System.currentTimeMillis()
+    val forceEmit = padChanged || chaseSettingChanged || recenterChanged
+
+    val pose =
+      chaseSmoother.update(
+        nowMs = now,
+        chaseCameraEnabled = uiState.settings.chaseCameraEnabled,
+        distancePreset = uiState.settings.chaseCameraDistance,
+        travelMode = uiState.travelMode,
+        isLandscape = isLandscape,
+        gpsHeadingDeg = effectiveHeading,
+        speedMps = loc.speedMps,
+        userPoint = effectivePoint,
+        isMatchedToRoad = uiState.matchResult.primary != null,
+        corridorWorldPoints = uiState.corridorWorldPoints,
+        isOverviewMode = uiState.isOverviewMode,
+        forceEmit = forceEmit,
+      )
+    lastChasePose = pose
+
     val h = mapSizePx.height.toDouble()
     val w = mapSizePx.width.toDouble()
     val visibleTop = cameraPaddingTopPx.toDouble().coerceIn(0.0, h * 0.70)
     val visibleBot = cameraPaddingBottomPx.toDouble().coerceIn(0.0, h * 0.80)
     val visibleHeight = (h - visibleTop - visibleBot).coerceAtLeast(80.0)
-    // In landscape: target 65% down the free area height => effectiveTop = visibleTop + 0.30 * visibleHeight
-    val topRatio = if (isLandscape) 0.30 else 0.34
-    var effectiveTop = if (h > 0) visibleTop + topRatio * visibleHeight else 0.0
+    var effectiveTop = if (h > 0) visibleTop + pose.topRatio * visibleHeight else 0.0
     var effectiveBot = if (h > 0) visibleBot else 0.0
     val maxSumH = (h - 48.0).coerceAtLeast(0.0)
     if (effectiveTop + effectiveBot > maxSumH && effectiveTop + effectiveBot > 0.0) {
@@ -711,33 +770,22 @@ private fun MapLibreHudViewInternal(
       return@LaunchedEffect
     }
 
-    val effectivePoint = uiState.displayLocationPoint ?: loc.point
-    val effectiveHeading = uiState.displayHeadingDeg ?: loc.headingDeg
-
-    val zoom =
-      if (uiState.travelMode == TravelMode.DRIVING) {
-        when {
-          loc.speedMps > 20.0 -> 15.6
-          loc.speedMps > 10.0 -> 16.3
-          else -> 16.8
-        }
-      } else {
-        17.8
-      }
-    val tilt = if (uiState.travelMode == TravelMode.DRIVING) 32.0 else 16.0
+    if (!pose.shouldEmitCameraUpdate) return@LaunchedEffect
 
     val cam =
       CameraPosition.Builder()
         .target(LatLng(effectivePoint.lat, effectivePoint.lon))
-        .bearing(effectiveHeading)
-        .zoom(zoom)
-        .tilt(tilt)
+        .bearing(pose.bearingDeg)
+        .zoom(pose.zoom)
+        .tilt(pose.tiltDeg)
         .padding(leftPad, effectiveTop, rightPad, effectiveBot)
         .build()
 
-    val now = System.currentTimeMillis()
     val isSmoothContinuous =
-      (uiState.isSimulatingDrive || (loc.isMock && (now - lastCameraMoveMs) < 220L)) && !padChanged
+      (uiState.isSimulatingDrive || (loc.isMock && (now - lastCameraMoveMs) < 220L)) &&
+        !padChanged &&
+        !chaseSettingChanged &&
+        !recenterChanged
     lastCameraMoveMs = now
     if (isSmoothContinuous) {
       map.cancelTransitions()
@@ -952,6 +1000,7 @@ private fun setupHudLayers(style: Style) {
     style.addLayer(
       SymbolLayer(LYR_SAVED_STREET_LABELS, SRC_SAVED_STREETS).withProperties(
         PropertyFactory.symbolPlacement(Property.SYMBOL_PLACEMENT_LINE),
+        PropertyFactory.textPitchAlignment(Property.TEXT_PITCH_ALIGNMENT_MAP),
         PropertyFactory.textField(Expression.get("label")),
         PropertyFactory.textSize(14f),
         PropertyFactory.textColor(RoadColors.PinPurple.toArgb()),
@@ -1032,6 +1081,7 @@ private fun setupHudLayers(style: Style) {
         PropertyFactory.circleColor(Expression.get("color")),
         PropertyFactory.circleStrokeWidth(2.0f),
         PropertyFactory.circleStrokeColor(android.graphics.Color.WHITE),
+        PropertyFactory.circlePitchAlignment(Property.CIRCLE_PITCH_ALIGNMENT_VIEWPORT),
         PropertyFactory.visibility(Property.NONE),
       ),
     )
@@ -1075,6 +1125,7 @@ private fun setupHudLayers(style: Style) {
       CircleLayer(LYR_USER_HALO, SRC_USER).withProperties(
         PropertyFactory.circleRadius(12f),
         PropertyFactory.circleColor(android.graphics.Color.WHITE),
+        PropertyFactory.circlePitchAlignment(Property.CIRCLE_PITCH_ALIGNMENT_MAP),
       ),
     )
   }
@@ -1084,6 +1135,21 @@ private fun setupHudLayers(style: Style) {
       CircleLayer(LYR_USER_DOT, SRC_USER).withProperties(
         PropertyFactory.circleRadius(8.5f),
         PropertyFactory.circleColor(RoadColors.Primary.toArgb()),
+        PropertyFactory.circlePitchAlignment(Property.CIRCLE_PITCH_ALIGNMENT_MAP),
+      ),
+    )
+  }
+
+  if (style.getLayer(LYR_USER_CHEVRON) == null) {
+    style.addLayer(
+      SymbolLayer(LYR_USER_CHEVRON, SRC_USER).withProperties(
+        PropertyFactory.iconImage(IMG_USER_CHEVRON),
+        PropertyFactory.iconPitchAlignment(Property.ICON_PITCH_ALIGNMENT_MAP),
+        PropertyFactory.iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
+        PropertyFactory.iconRotate(Expression.get("bearing")),
+        PropertyFactory.iconAllowOverlap(true),
+        PropertyFactory.iconIgnorePlacement(true),
+        PropertyFactory.visibility(Property.NONE),
       ),
     )
   }
@@ -1093,6 +1159,7 @@ private fun setupHudLayers(style: Style) {
       SymbolLayer(LYR_USER_MOCK_BADGE, SRC_USER).withProperties(
         PropertyFactory.iconImage(IMG_MOCK_LOCK),
         PropertyFactory.iconOffset(arrayOf(10f, -10f)),
+        PropertyFactory.iconPitchAlignment(Property.ICON_PITCH_ALIGNMENT_VIEWPORT),
         PropertyFactory.iconAllowOverlap(true),
         PropertyFactory.iconIgnorePlacement(true),
         PropertyFactory.visibility(Property.NONE),
@@ -1105,6 +1172,7 @@ private fun setupHudLayers(style: Style) {
     style.addLayer(
       SymbolLayer(LYR_SAVED_PINS, SRC_SAVED_PINS).withProperties(
         PropertyFactory.iconImage(Expression.get("iconId")),
+        PropertyFactory.iconPitchAlignment(Property.ICON_PITCH_ALIGNMENT_VIEWPORT),
         PropertyFactory.iconAllowOverlap(true),
         PropertyFactory.iconIgnorePlacement(true),
         PropertyFactory.iconAnchor(Property.ICON_ANCHOR_BOTTOM),
@@ -1116,6 +1184,7 @@ private fun setupHudLayers(style: Style) {
     style.addLayer(
       SymbolLayer(LYR_FOUND_PIN, SRC_FOUND_PIN).withProperties(
         PropertyFactory.iconImage(Expression.get("iconId")),
+        PropertyFactory.iconPitchAlignment(Property.ICON_PITCH_ALIGNMENT_VIEWPORT),
         PropertyFactory.iconAllowOverlap(true),
         PropertyFactory.iconIgnorePlacement(true),
         PropertyFactory.iconAnchor(Property.ICON_ANCHOR_BOTTOM),
@@ -1127,6 +1196,7 @@ private fun setupHudLayers(style: Style) {
     style.addLayer(
       SymbolLayer(LYR_LANDMARKS, SRC_LANDMARKS).withProperties(
         PropertyFactory.iconImage(Expression.get("iconId")),
+        PropertyFactory.iconPitchAlignment(Property.ICON_PITCH_ALIGNMENT_VIEWPORT),
         PropertyFactory.iconAllowOverlap(false),
         PropertyFactory.iconIgnorePlacement(false),
         PropertyFactory.iconAnchor(Property.ICON_ANCHOR_BOTTOM),
@@ -1138,6 +1208,7 @@ private fun setupHudLayers(style: Style) {
     style.addLayer(
       SymbolLayer(LYR_PINS, SRC_PINS).withProperties(
         PropertyFactory.iconImage(Expression.get("iconId")),
+        PropertyFactory.iconPitchAlignment(Property.ICON_PITCH_ALIGNMENT_VIEWPORT),
         PropertyFactory.iconAllowOverlap(true),
         PropertyFactory.iconIgnorePlacement(true),
         PropertyFactory.iconAnchor(Property.ICON_ANCHOR_BOTTOM),
@@ -1152,6 +1223,7 @@ private fun syncHudLayers(
   uiState: RoadHudUiState,
   isMapDark: Boolean,
   isPanelExpanded: Boolean = false,
+  chasePose: ChaseCameraPose? = null,
 ) {
   if (!style.isFullyLoaded) return
   val lightVis = if (isMapDark) Property.NONE else Property.VISIBLE
@@ -1165,13 +1237,38 @@ private fun syncHudLayers(
     PropertyFactory.circleStrokeWidth(if (isMapDark) 0f else 1.0f),
     PropertyFactory.circleStrokeColor(android.graphics.Color.argb(46, 11, 18, 32)),
   )
-  // 1) User dot, mock lock badge & heading cone
+
+  val buildingVis = if (uiState.settings.performanceModeEnabled) Property.NONE else Property.VISIBLE
+  style.layers.filterIsInstance<FillExtrusionLayer>().forEach { layer ->
+    layer.setProperties(PropertyFactory.visibility(buildingVis))
+  }
+
+  val chaseActive = uiState.settings.chaseCameraEnabled
+
+  // 1) User dot / chase chevron, mock lock badge & heading cone
   val loc = uiState.location
   val renderPoint = uiState.displayLocationPoint ?: loc?.point
   val renderHeading = uiState.displayHeadingDeg ?: loc?.headingDeg
   if (renderPoint != null && renderHeading != null) {
     val pt = Point.fromLngLat(renderPoint.lon, renderPoint.lat)
-    style.getSourceAs<GeoJsonSource>(SRC_USER)?.setGeoJson(Feature.fromGeometry(pt))
+    val userFeature =
+      Feature.fromGeometry(pt).apply {
+        addNumberProperty("bearing", renderHeading)
+      }
+    style.getSourceAs<GeoJsonSource>(SRC_USER)?.setGeoJson(userFeature)
+
+    if (chaseActive) {
+      if (style.getImage(IMG_USER_CHEVRON) == null) {
+        style.addImage(IMG_USER_CHEVRON, createUserChevronBitmap(context))
+      }
+      style.getLayer(LYR_USER_CHEVRON)?.setProperties(PropertyFactory.visibility(Property.VISIBLE))
+      style.getLayer(LYR_USER_HALO)?.setProperties(PropertyFactory.visibility(Property.NONE))
+      style.getLayer(LYR_USER_DOT)?.setProperties(PropertyFactory.visibility(Property.NONE))
+    } else {
+      style.getLayer(LYR_USER_CHEVRON)?.setProperties(PropertyFactory.visibility(Property.NONE))
+      style.getLayer(LYR_USER_HALO)?.setProperties(PropertyFactory.visibility(Property.VISIBLE))
+      style.getLayer(LYR_USER_DOT)?.setProperties(PropertyFactory.visibility(Property.VISIBLE))
+    }
 
     if (BuildConfig.DEBUG && uiState.isMockModeActive) {
       if (style.getImage(IMG_MOCK_LOCK) == null) {
@@ -1182,7 +1279,9 @@ private fun syncHudLayers(
       style.getLayer(LYR_USER_MOCK_BADGE)?.setProperties(PropertyFactory.visibility(Property.NONE))
     }
 
-    val coneDist = if (uiState.travelMode == TravelMode.DRIVING) 85.0 else 38.0
+    val coneDist =
+      chasePose?.headingConeMeters
+        ?: if (uiState.travelMode == TravelMode.DRIVING) 85.0 else 38.0
     val conePts = mutableListOf(pt)
     for (offset in -28..28 step 7) {
       val edge = GeoMath.offsetPoint(renderPoint, (renderHeading + offset + 360.0) % 360.0, coneDist)
@@ -1194,6 +1293,7 @@ private fun syncHudLayers(
   } else {
     style.getSourceAs<GeoJsonSource>(SRC_USER)?.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
     style.getSourceAs<GeoJsonSource>(SRC_CONE)?.setGeoJson(FeatureCollection.fromFeatures(emptyArray()))
+    style.getLayer(LYR_USER_CHEVRON)?.setProperties(PropertyFactory.visibility(Property.NONE))
     style.getLayer(LYR_USER_MOCK_BADGE)?.setProperties(PropertyFactory.visibility(Property.NONE))
   }
 
@@ -1212,12 +1312,28 @@ private fun syncHudLayers(
   val pinFeatures = mutableListOf<Feature>()
 
   val themeKey = if (isMapDark) "d" else "l"
+  val maxPinDistanceMeters =
+    if (chaseActive && !uiState.isOverviewMode && renderPoint != null) {
+      chasePose?.pinMaxDistanceMeters ?: ChaseCameraSmoother.CHASE_PIN_MAX_DIST_METERS
+    } else {
+      null
+    }
+  val stubClampMeters =
+    if (!uiState.isOverviewMode && renderPoint != null) {
+      val clampPitch = chasePose?.tiltDeg ?: if (uiState.travelMode == TravelMode.DRIVING) 32.0 else 16.0
+      val clampZoom = chasePose?.zoom ?: if (uiState.travelMode == TravelMode.DRIVING) 16.3 else 17.8
+      ChaseCameraSmoother.maxPitchedStubMeters(renderPoint.lat, clampZoom, clampPitch)
+    } else {
+      null
+    }
+
   if (offRoad.isOffRoad && offRoad.selectedCandidate == null) {
     offRoad.candidates.forEachIndexed { idx, cand ->
       val colorInt = RoadColors.pinColorForIndex(idx + 1).toArgb()
       val hexColor = String.format("#%06X", 0xFFFFFF and colorInt)
-      if (cand.stubWorldPoints.size >= 2) {
-        val line = LineString.fromLngLats(cand.stubWorldPoints.map { Point.fromLngLat(it.lon, it.lat) })
+      val clampedStub = ChaseCameraSmoother.clampPolylineByMeters(cand.stubWorldPoints, stubClampMeters)
+      if (clampedStub.size >= 2) {
+        val line = LineString.fromLngLats(clampedStub.map { Point.fromLngLat(it.lon, it.lat) })
         val sf = Feature.fromGeometry(line)
         sf.addStringProperty("color", hexColor)
         stubFeatures += sf
@@ -1242,8 +1358,9 @@ private fun syncHudLayers(
           selType == FeatureType.HAIRPIN ||
           selType == FeatureType.WINDING_ROAD
       if (isCurveSel) {
-        if (selected.outgoingMainWorldPoints.size >= 2) {
-          val line = LineString.fromLngLats(selected.outgoingMainWorldPoints.map { Point.fromLngLat(it.lon, it.lat) })
+        val clampedCurve = ChaseCameraSmoother.clampPolylineByMeters(selected.outgoingMainWorldPoints, stubClampMeters)
+        if (clampedCurve.size >= 2) {
+          val line = LineString.fromLngLats(clampedCurve.map { Point.fromLngLat(it.lon, it.lat) })
           val feat = Feature.fromGeometry(line)
           feat.addStringProperty("color", hexColor)
           feat.addNumberProperty("width", 3.2f)
@@ -1252,8 +1369,9 @@ private fun syncHudLayers(
         }
       } else {
         selected.branches.forEach { branch ->
-          if (branch.worldPoints.size >= 2) {
-            val line = LineString.fromLngLats(branch.worldPoints.map { Point.fromLngLat(it.lon, it.lat) })
+          val clampedBranch = ChaseCameraSmoother.clampPolylineByMeters(branch.worldPoints, stubClampMeters)
+          if (clampedBranch.size >= 2) {
+            val line = LineString.fromLngLats(clampedBranch.map { Point.fromLngLat(it.lon, it.lat) })
             val feat = Feature.fromGeometry(line)
             feat.addStringProperty("color", hexColor)
             stubFeatures += feat
@@ -1268,6 +1386,12 @@ private fun syncHudLayers(
     }
 
     uiState.features.forEach { feat ->
+      val featWithinHorizon =
+        maxPinDistanceMeters == null ||
+          renderPoint == null ||
+          GeoMath.haversineMeters(renderPoint, feat.anchor) <= maxPinDistanceMeters
+      if (!featWithinHorizon && feat.index != selected?.index) return@forEach
+
       val colorInt = RoadColors.pinColorForIndex(feat.index).toArgb()
       val fType = feat.effectiveDisplayType()
       val isCurveFeat =
@@ -1278,8 +1402,15 @@ private fun syncHudLayers(
         val sortedBranches = feat.branches.sortedBy { it.distanceMeters }
         val limitPins = feat.isInterchangeGroup() && !uiState.isOverviewMode && !isPanelExpanded
         val visibleBranches =
-          if (limitPins) sortedBranches.filter { it.distanceMeters <= 400.0 }.take(4)
-          else sortedBranches
+          when {
+            maxPinDistanceMeters != null && renderPoint != null ->
+              sortedBranches.filter { br ->
+                val pinLoc = br.departurePoint ?: br.worldPoints.firstOrNull() ?: feat.anchor
+                GeoMath.haversineMeters(renderPoint, pinLoc) <= maxPinDistanceMeters
+              }.let { if (limitPins) it.take(4) else it }
+            limitPins -> sortedBranches.filter { it.distanceMeters <= 400.0 }.take(4)
+            else -> sortedBranches
+          }
         visibleBranches.forEach { branch ->
           val pinLoc = branch.departurePoint ?: branch.worldPoints.firstOrNull() ?: feat.anchor
           val iconId = "pin_${branch.badgeId}_${colorInt}_$themeKey"
@@ -1292,7 +1423,7 @@ private fun syncHudLayers(
           pinFeatures += f
         }
         val overflowCount = sortedBranches.size - visibleBranches.size
-        if (limitPins && overflowCount > 0) {
+        if (limitPins && overflowCount > 0 && visibleBranches.isNotEmpty()) {
           val overflowLabel = "+$overflowCount"
           val basePt = visibleBranches.lastOrNull()?.departurePoint ?: feat.anchor
           val overflowPt = GeoMath.offsetPoint(basePt, uiState.location?.headingDeg ?: 0.0, 14.0)
@@ -1305,7 +1436,7 @@ private fun syncHudLayers(
           of.addNumberProperty("featureIndex", feat.index)
           pinFeatures += of
         }
-      } else {
+      } else if (featWithinHorizon) {
         val label = "${feat.index}"
         val iconId = "pin_${label}_${colorInt}_$themeKey"
         if (style.getImage(iconId) == null) {
@@ -1341,6 +1472,13 @@ private fun syncHudLayers(
         }
       }
     } else {
+      val keepSavedPin =
+        maxPinDistanceMeters == null ||
+          renderPoint == null ||
+          pin.id == uiState.activeRoutePinId ||
+          pin.id == uiState.selectedPinId ||
+          GeoMath.haversineMeters(renderPoint, pin.point) <= maxPinDistanceMeters
+      if (!keepSavedPin) return@forEach
       val labelText = pin.mapLabelText()
       val iconId = "saved_pin_${pin.id}_${labelText.hashCode()}_$themeKey"
       if (style.getImage(iconId) == null) {
@@ -1417,6 +1555,11 @@ private fun syncHudLayers(
   val landmarkFeatures =
     if (uiState.settings.landmarksAheadEnabled && uiState.landmarksAhead.isNotEmpty()) {
       uiState.landmarksAhead.mapNotNull { lm ->
+        if (maxPinDistanceMeters != null && renderPoint != null &&
+          GeoMath.haversineMeters(renderPoint, lm.point) > maxPinDistanceMeters
+        ) {
+          return@mapNotNull null
+        }
         val title = lm.name.primaryText ?: return@mapNotNull null
         val iconId = "lm_${lm.id}_${title.hashCode()}_$themeKey"
         if (style.getImage(iconId) == null) {
@@ -1739,6 +1882,51 @@ private fun createLandmarkBadgeBitmap(
   canvas.drawCircle(w / 2f, h - 3f * density, 2.5f * density, Paint(Paint.ANTI_ALIAS_FLAG).apply {
     color = android.graphics.Color.parseColor("#00A389")
   })
+  return bmp
+}
+
+private fun createUserChevronBitmap(context: Context): Bitmap {
+  val density = context.resources.displayMetrics.density
+  val sizePx = (44f * density).toInt().coerceAtLeast(44)
+  val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+  val canvas = Canvas(bmp)
+  val cx = sizePx / 2f
+  val cy = sizePx / 2f
+
+  val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = android.graphics.Color.argb(60, 45, 124, 255)
+    style = Paint.Style.FILL
+  }
+  canvas.drawCircle(cx, cy, sizePx * 0.42f, glowPaint)
+
+  val chevronPath = Path().apply {
+    moveTo(cx, 5f * density)
+    lineTo(sizePx - 8f * density, sizePx - 8f * density)
+    lineTo(cx, cy + 5f * density)
+    lineTo(8f * density, sizePx - 8f * density)
+    close()
+  }
+
+  val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = android.graphics.Color.argb(85, 0, 0, 0)
+    style = Paint.Style.STROKE
+    strokeWidth = 5.5f * density
+    strokeJoin = Paint.Join.ROUND
+  }
+  canvas.drawPath(chevronPath, shadowPaint)
+
+  val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = android.graphics.Color.WHITE
+    style = Paint.Style.STROKE
+    strokeWidth = 3.5f * density
+    strokeJoin = Paint.Join.ROUND
+  }
+  val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = RoadColors.Primary.toArgb()
+    style = Paint.Style.FILL
+  }
+  canvas.drawPath(chevronPath, borderPaint)
+  canvas.drawPath(chevronPath, fillPaint)
   return bmp
 }
 

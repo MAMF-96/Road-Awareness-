@@ -9,23 +9,36 @@ import com.example.data.model.LoadedTileBounds
 import com.example.data.model.OsmNode
 import com.example.data.model.OsmTags
 import com.example.data.model.OsmWay
+import com.example.data.model.PlanarizeStats
 import com.example.data.model.PoiItem
 import com.example.data.model.RoadGraph
 import com.example.data.model.TileNameLabelRecord
 import com.example.data.remote.TileRoadGraphSource
 import com.example.domain.GeoMath
 import com.example.domain.SpatialGraphIndex
+import com.example.domain.TileEndpointPlanarizer
+import com.example.ui.MainThreadWatchdog
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.min
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
- * Single authoritative in-memory road-graph repository fed by tiles, Overpass cells, and live map fallback.
- * Maintains a rolling keep-window, LRU eviction cap, unified spatial hash index, and monotonic [version]
- * so MapMatcher, AheadGraphAnalyzer, Search, and Pipeline Diagnostics always read the exact same snapshot.
+ * Copy-on-write authoritative road-graph repository.
+ *
+ * Locking discipline:
+ * - [currentSnapshot] is lock-free via [StateFlow].
+ * - [synchronized] blocks ONLY copy/swap immutable entry references (< microseconds).
+ * - Heavy graph merging, endpoint planarization, cross-tile border stitching, Overpass enrichment,
+ *   and [SpatialGraphIndex.build] always execute OUTSIDE [lock].
+ * - Publishing checks `entriesVersion == captured.entriesVersion` and loops if mutated concurrently.
+ * - Background coalesced rebuilds run at most one at a time with a 150 ms debounce and dirty flag.
  */
 class RoadGraphRepository(
   private val maxMemoryTiles: Int = AppConfig.MAX_MEMORY_TILES,
@@ -57,6 +70,7 @@ class RoadGraphRepository(
     val mapFallbackWaysAdded: Int = 0,
     val hasPrimaryEdgeWithin150m: Boolean = false,
     val borderStitchStats: BorderStitchStats = BorderStitchStats(),
+    val planarizeStats: PlanarizeStats = PlanarizeStats(),
   ) {
     fun oldestAgeUnderPoint(point: GeoPoint): Long? {
       val matching =
@@ -79,7 +93,6 @@ class RoadGraphRepository(
       val res = ArrayList<TileNameLabelRecord>(64)
       for ((k, list) in labelsByTile) {
         if (list.isEmpty()) continue
-        // Include any tile within rough ~0.04 deg (~4km) of point
         val sample = list.firstOrNull()?.points?.firstOrNull()
         if (sample == null || (abs(sample.lat - point.lat) <= 0.05 && abs(GeoMath.unwrapLonDelta(sample.lon - point.lon)) <= 0.06)) {
           res.addAll(list)
@@ -99,7 +112,7 @@ class RoadGraphRepository(
     val isEmpty: Boolean,
     val labels: List<TileNameLabelRecord>,
     val pois: List<PoiItem>,
-    var lastAccessMs: Long,
+    val entryRevision: Long,
   )
 
   private data class StoredOverpassEntry(
@@ -108,7 +121,22 @@ class RoadGraphRepository(
     val graph: RoadGraph,
     val fetchedAtMs: Long,
     val pois: List<PoiItem>,
-    var lastAccessMs: Long,
+  )
+
+  private data class CapturedRepoState(
+    val entriesVersion: Long,
+    val tiles: Map<String, StoredTileEntry>,
+    val overpassCells: Map<String, StoredOverpassEntry>,
+    val mapFallback: RoadGraph?,
+    val evalCenter: GeoPoint?,
+    val memoryHits: Long,
+    val memoryMisses: Long,
+    val evictionCount: Int,
+  )
+
+  private data class IncrementalTileCache(
+    val tileRevisions: Map<String, Long> = emptyMap(),
+    val tileNodeToDistinct: Map<String, List<Pair<Long, Long>>> = emptyMap(),
   )
 
   private val lock = Any()
@@ -120,10 +148,21 @@ class RoadGraphRepository(
   private var currentFallbackEvalCenter: GeoPoint? = null
   private var lastFallbackEvalPublishedCenter: GeoPoint? = null
   private var currentKeepHorizonMeters: Double = 3000.0
-  private var versionCounter: Long = 0L
+  private var entriesVersion: Long = 0L
+  private var entryRevisionCounter: Long = 0L
+  private var snapshotVersionCounter: Long = 0L
   private var memoryHits: Long = 0L
   private var memoryMisses: Long = 0L
   private var evictionCount: Int = 0
+
+  // Incremental per-tile metadata cache accessed under rebuildMutex/single builder
+  private val rebuildLock = Any()
+  private var incrementalTileCache = IncrementalTileCache()
+
+  // Coalescing / debounce state
+  private val rebuildPendingDirty = AtomicBoolean(false)
+  private val rebuildRunning = AtomicBoolean(false)
+  private var debouncedRebuildJob: Job? = null
 
   private val emptyGraph =
     RoadGraph(
@@ -157,14 +196,27 @@ class RoadGraphRepository(
 
   fun currentSnapshot(): GraphSnapshot = _snapshot.value
 
+  private inline fun <T> withTimingLock(block: () -> T): T {
+    val startWait = System.nanoTime()
+    return synchronized(lock) {
+      val acquired = System.nanoTime()
+      try {
+        block()
+      } finally {
+        val endHold = System.nanoTime()
+        MainThreadWatchdog.recordRepoLockTiming(acquired - startWait, endHold - acquired)
+      }
+    }
+  }
+
   fun hasTileInMemory(tileKey: String): Boolean =
-    synchronized(lock) { tileEntries.containsKey(tileKey) }
+    withTimingLock { tileEntries.containsKey(tileKey) }
 
   fun getMemoryTileKeys(): Set<String> =
-    synchronized(lock) { tileEntries.keys.toHashSet() }
+    withTimingLock { tileEntries.keys.toHashSet() }
 
   fun recordMemoryCacheProbe(hit: Boolean) {
-    synchronized(lock) {
+    withTimingLock {
       if (hit) memoryHits++ else memoryMisses++
     }
   }
@@ -173,19 +225,23 @@ class RoadGraphRepository(
     center: GeoPoint,
     horizonMeters: Double,
     keepTileKeys: Set<String>,
-  ): GraphSnapshot =
-    synchronized(lock) {
-      currentKeepCenter = center
-      currentFallbackEvalCenter = center
-      currentKeepHorizonMeters = horizonMeters
-      currentKeepTiles = keepTileKeys
-      val evictedAny = evictBeyondWindowAndCapsLocked()
-      if (evictedAny) {
-        rebuildAndPublishLocked()
-      } else {
-        _snapshot.value
+  ): GraphSnapshot {
+    val evictedAny =
+      withTimingLock {
+        currentKeepCenter = center
+        currentFallbackEvalCenter = center
+        currentKeepHorizonMeters = horizonMeters
+        currentKeepTiles = keepTileKeys
+        val evicted = evictBeyondWindowAndCapsLocked()
+        if (evicted) entriesVersion++
+        evicted
       }
+    return if (evictedAny) {
+      rebuildAndPublishCoW()
+    } else {
+      _snapshot.value
     }
+  }
 
   fun upsertTileGraph(
     tileKey: String,
@@ -195,9 +251,9 @@ class RoadGraphRepository(
     isEmptyDecoded: Boolean,
     labels: List<TileNameLabelRecord> = emptyList(),
     pois: List<PoiItem> = emptyList(),
-  ): GraphSnapshot =
-    synchronized(lock) {
-      val now = System.currentTimeMillis()
+  ): GraphSnapshot {
+    withTimingLock {
+      val rev = ++entryRevisionCounter
       tileEntries[tileKey] =
         StoredTileEntry(
           tileKey = tileKey,
@@ -207,18 +263,21 @@ class RoadGraphRepository(
           isEmpty = isEmptyDecoded,
           labels = labels,
           pois = pois,
-          lastAccessMs = now,
+          entryRevision = rev,
         )
       evictBeyondWindowAndCapsLocked()
-      rebuildAndPublishLocked()
+      entriesVersion++
     }
+    return rebuildAndPublishCoW()
+  }
 
   fun upsertDecodedArtifacts(
     artifacts: List<DecodedTileArtifact>,
-  ): GraphSnapshot =
-    synchronized(lock) {
-      val now = System.currentTimeMillis()
+    deferRebuildScope: CoroutineScope? = null,
+  ): GraphSnapshot {
+    withTimingLock {
       for (art in artifacts) {
+        val rev = ++entryRevisionCounter
         tileEntries[art.tileKey] =
           StoredTileEntry(
             tileKey = art.tileKey,
@@ -228,25 +287,31 @@ class RoadGraphRepository(
             isEmpty = art.isEmptyDecoded,
             labels = art.labels,
             pois = art.pois,
-            lastAccessMs = now,
+            entryRevision = rev,
           )
       }
       evictBeyondWindowAndCapsLocked()
-      rebuildAndPublishLocked()
+      entriesVersion++
     }
+    if (deferRebuildScope != null) {
+      scheduleCoalescedRebuild(deferRebuildScope)
+      return _snapshot.value
+    }
+    return rebuildAndPublishCoW()
+  }
 
   fun isTileFreshInMemory(tileKey: String, staleAgeMs: Long, nowMs: Long = System.currentTimeMillis()): Boolean =
-    synchronized(lock) {
-      val e = tileEntries[tileKey] ?: return@synchronized false
+    withTimingLock {
+      val e = tileEntries[tileKey] ?: return@withTimingLock false
       (nowMs - e.fetchedAtMs) < staleAgeMs
     }
 
   fun upsertTileGraphsBatch(
     tiles: List<TileBatchItem>,
-  ): GraphSnapshot =
-    synchronized(lock) {
-      val now = System.currentTimeMillis()
+  ): GraphSnapshot {
+    withTimingLock {
       for (t in tiles) {
+        val rev = ++entryRevisionCounter
         tileEntries[t.tileKey] =
           StoredTileEntry(
             tileKey = t.tileKey,
@@ -256,12 +321,14 @@ class RoadGraphRepository(
             isEmpty = t.isEmptyDecoded,
             labels = t.labels,
             pois = t.pois,
-            lastAccessMs = now,
+            entryRevision = rev,
           )
       }
       evictBeyondWindowAndCapsLocked()
-      rebuildAndPublishLocked()
+      entriesVersion++
     }
+    return rebuildAndPublishCoW()
+  }
 
   data class TileBatchItem(
     val tileKey: String,
@@ -279,8 +346,8 @@ class RoadGraphRepository(
     cellGraph: RoadGraph,
     fetchedAtMs: Long,
     pois: List<PoiItem> = emptyList(),
-  ): GraphSnapshot =
-    synchronized(lock) {
+  ): GraphSnapshot {
+    withTimingLock {
       overpassEntries[cellKey] =
         StoredOverpassEntry(
           cellKey = cellKey,
@@ -288,47 +355,59 @@ class RoadGraphRepository(
           graph = cellGraph,
           fetchedAtMs = fetchedAtMs,
           pois = pois,
-          lastAccessMs = System.currentTimeMillis(),
         )
       evictOverpassBeyondCapsLocked()
-      rebuildAndPublishLocked()
+      entriesVersion++
     }
+    return rebuildAndPublishCoW()
+  }
 
   fun setMapFallbackGraph(
     graph: RoadGraph?,
     evalCenter: GeoPoint? = null,
-  ): GraphSnapshot =
-    synchronized(lock) {
+  ): GraphSnapshot {
+    withTimingLock {
       mapFallbackGraph = graph
       if (evalCenter != null) {
         currentFallbackEvalCenter = evalCenter
       }
-      rebuildAndPublishLocked()
+      entriesVersion++
     }
+    return rebuildAndPublishCoW()
+  }
 
   fun reevaluateFallbackForPosition(
     center: GeoPoint,
     minMoveMeters: Double = 50.0,
-  ): GraphSnapshot? =
-    synchronized(lock) {
-      currentFallbackEvalCenter = center
-      val fallback = mapFallbackGraph ?: return@synchronized null
-      if (fallback.ways.isEmpty()) return@synchronized null
-      val lastEval = lastFallbackEvalPublishedCenter
-      val moved = lastEval?.let { GeoMath.haversineMeters(it, center) } ?: Double.MAX_VALUE
-      if (moved < minMoveMeters) return@synchronized null
-      val curSnap = _snapshot.value
-      val primaryNear =
-        hasPrimaryWayWithin150mLocked(center)
-      if (!primaryNear || curSnap.mapFallbackUsed) {
-        rebuildAndPublishLocked()
-      } else {
-        null
+  ): GraphSnapshot? {
+    val shouldRebuild =
+      withTimingLock {
+        currentFallbackEvalCenter = center
+        val fallback = mapFallbackGraph ?: return@withTimingLock false
+        if (fallback.ways.isEmpty()) return@withTimingLock false
+        val lastEval = lastFallbackEvalPublishedCenter
+        val moved = lastEval?.let { GeoMath.haversineMeters(it, center) } ?: Double.MAX_VALUE
+        moved >= minMoveMeters
       }
-    }
+    if (!shouldRebuild) return null
 
-  fun clear(): GraphSnapshot =
-    synchronized(lock) {
+    // Evaluate outside lock against current immutable snapshot
+    val curSnap = _snapshot.value
+    val primaryNear =
+      curSnap.index.queryWaysAround(center, 150.0).any { w ->
+        w.source != GraphDataSource.MAP &&
+          w.points.size >= 2 &&
+          GeoMath.snapToPolyline(center, w.points).distanceMeters <= 150.0
+      }
+    return if (!primaryNear || curSnap.mapFallbackUsed) {
+      rebuildAndPublishCoW()
+    } else {
+      null
+    }
+  }
+
+  fun clear(): GraphSnapshot {
+    withTimingLock {
       tileEntries.clear()
       overpassEntries.clear()
       mapFallbackGraph = null
@@ -339,8 +418,106 @@ class RoadGraphRepository(
       evictionCount = 0
       memoryHits = 0L
       memoryMisses = 0L
-      rebuildAndPublishLocked()
+      entriesVersion++
     }
+    synchronized(rebuildLock) {
+      incrementalTileCache = IncrementalTileCache()
+    }
+    return rebuildAndPublishCoW()
+  }
+
+  /**
+   * Coalesces multiple rapid streaming updates into a single background rebuild debounced by 150 ms.
+   * At most one rebuild runs at a time; extra updates mark dirty and schedule another pass.
+   */
+  fun scheduleCoalescedRebuild(
+    scope: CoroutineScope,
+    debounceMs: Long = 150L,
+    onPublished: ((GraphSnapshot) -> Unit)? = null,
+  ) {
+    rebuildPendingDirty.set(true)
+    if (rebuildRunning.get()) return
+    debouncedRebuildJob?.cancel()
+    debouncedRebuildJob =
+      scope.launch {
+        delay(debounceMs)
+        drainCoalescedRebuilds(onPublished)
+      }
+  }
+
+  private fun drainCoalescedRebuilds(onPublished: ((GraphSnapshot) -> Unit)?) {
+    if (!rebuildRunning.compareAndSet(false, true)) return
+    try {
+      while (rebuildPendingDirty.getAndSet(false)) {
+        val snap = rebuildAndPublishCoW()
+        onPublished?.invoke(snap)
+      }
+    } finally {
+      rebuildRunning.set(false)
+      if (rebuildPendingDirty.get()) {
+        if (rebuildRunning.compareAndSet(false, true)) {
+          try {
+            while (rebuildPendingDirty.getAndSet(false)) {
+              val snap = rebuildAndPublishCoW()
+              onPublished?.invoke(snap)
+            }
+          } finally {
+            rebuildRunning.set(false)
+          }
+        }
+      }
+    }
+  }
+
+  private fun captureStateUnderBriefLock(): CapturedRepoState =
+    withTimingLock {
+      CapturedRepoState(
+        entriesVersion = entriesVersion,
+        tiles = LinkedHashMap(tileEntries),
+        overpassCells = LinkedHashMap(overpassEntries),
+        mapFallback = mapFallbackGraph,
+        evalCenter = currentFallbackEvalCenter ?: currentKeepCenter,
+        memoryHits = memoryHits,
+        memoryMisses = memoryMisses,
+        evictionCount = evictionCount,
+      )
+    }
+
+  /**
+   * Copy-on-write rebuild: reads immutable entry snapshots under a microsecond lock,
+   * constructs the merged/planarized graph and SpatialGraphIndex completely OUTSIDE [lock],
+   * then publishes under a microsecond lock only if [entriesVersion] has not changed.
+   */
+  fun rebuildAndPublishCoW(): GraphSnapshot {
+    var attempts = 0
+    while (attempts++ < 6) {
+      val captured = captureStateUnderBriefLock()
+      val built = synchronized(rebuildLock) { buildSnapshotOutsideLock(captured) }
+      val published =
+        withTimingLock {
+          if (entriesVersion == captured.entriesVersion) {
+            snapshotVersionCounter++
+            val finalSnap = built.copy(version = snapshotVersionCounter)
+            lastFallbackEvalPublishedCenter = captured.evalCenter
+            _snapshot.value = finalSnap
+            finalSnap
+          } else {
+            null
+          }
+        }
+      if (published != null) return published
+    }
+    // Final unconditional attempt after retries
+    val captured = captureStateUnderBriefLock()
+    val built = synchronized(rebuildLock) { buildSnapshotOutsideLock(captured) }
+    return withTimingLock {
+      snapshotVersionCounter++
+      val finalSnap = built.copy(version = snapshotVersionCounter)
+      lastFallbackEvalPublishedCenter = captured.evalCenter
+      _snapshot.value = finalSnap
+      finalSnap
+    }
+  }
 
   private fun evictBeyondWindowAndCapsLocked(): Boolean {
     var evicted = false
@@ -395,16 +572,6 @@ class RoadGraphRepository(
     }
   }
 
-  private fun hasPrimaryWayWithin150mLocked(center: GeoPoint): Boolean {
-    for (entry in tileEntries.values) {
-      if (hasWayWithinRadius(entry.graph.ways.values, center, 150.0)) return true
-    }
-    for (cell in overpassEntries.values) {
-      if (hasWayWithinRadius(cell.graph.ways.values, center, 150.0)) return true
-    }
-    return false
-  }
-
   private fun hasWayWithinRadius(
     ways: Collection<OsmWay>,
     center: GeoPoint,
@@ -438,17 +605,49 @@ class RoadGraphRepository(
     return false
   }
 
-  private fun rebuildAndPublishLocked(): GraphSnapshot {
+  private fun buildSnapshotOutsideLock(captured: CapturedRepoState): GraphSnapshot {
+    val tileEntriesMap = captured.tiles
+    val overpassMap = captured.overpassCells
+
+    // Incremental per-tile distinct node-way pair extraction (only compute for newly added/changed tiles)
+    val prevCache = synchronized(rebuildLock) { incrementalTileCache }
+    val nextRevs = HashMap<String, Long>(tileEntriesMap.size)
+    val nextPairs = HashMap<String, List<Pair<Long, Long>>>(tileEntriesMap.size)
+
+    for ((k, entry) in tileEntriesMap) {
+      nextRevs[k] = entry.entryRevision
+      val cachedPairs =
+        if (prevCache.tileRevisions[k] == entry.entryRevision) prevCache.tileNodeToDistinct[k]
+        else null
+      if (cachedPairs != null) {
+        nextPairs[k] = cachedPairs
+      } else {
+        val pairs = ArrayList<Pair<Long, Long>>(entry.graph.ways.size * 3)
+        for ((wId, way) in entry.graph.ways) {
+          val seenNodes = HashSet<Long>(way.nodeIds.size * 2)
+          for (nid in way.nodeIds) {
+            if (seenNodes.add(nid)) {
+              pairs += nid to wId
+            }
+          }
+        }
+        nextPairs[k] = pairs
+      }
+    }
+    synchronized(rebuildLock) {
+      incrementalTileCache = IncrementalTileCache(nextRevs, nextPairs)
+    }
+
     val mergedNodes = HashMap<Long, OsmNode>(4096)
     val mergedWays = HashMap<Long, OsmWay>(2048)
     val wayOriginTileById = HashMap<Long, String>(2048)
     val nodeToWays = HashMap<Long, MutableList<Long>>(4096)
-    val loadedTiles = ArrayList<LoadedTileBounds>(tileEntries.size)
-    val tileTimestamps = HashMap<String, Long>(tileEntries.size)
+    val loadedTiles = ArrayList<LoadedTileBounds>(tileEntriesMap.size)
+    val tileTimestamps = HashMap<String, Long>(tileEntriesMap.size)
     val emptyKeys = HashSet<String>()
-    val labelsByTile = HashMap<String, List<TileNameLabelRecord>>(tileEntries.size)
+    val labelsByTile = HashMap<String, List<TileNameLabelRecord>>(tileEntriesMap.size)
     val allPois = LinkedHashMap<Long, PoiItem>(256)
-    val tileWayCounts = ArrayList<Int>(tileEntries.size)
+    val tileWayCounts = ArrayList<Int>(tileEntriesMap.size)
     var latestFetchedAt = 0L
     var allFromCache = true
     var tileEdgeCount = 0
@@ -456,7 +655,7 @@ class RoadGraphRepository(
     var idCollisions = 0
 
     // 1. Tile baseline (all decoded z14 tiles)
-    for ((k, entry) in tileEntries) {
+    for ((k, entry) in tileEntriesMap) {
       loadedTiles += entry.bounds
       tileTimestamps[k] = entry.fetchedAtMs
       if (entry.isEmpty) emptyKeys += k
@@ -476,12 +675,27 @@ class RoadGraphRepository(
         mergedWays[wId] = way
         wayOriginTileById[wId] = k
         tileEdgeCount++
-        for (nid in way.nodeIds.distinct()) {
-          val list = nodeToWays.getOrPut(nid) { ArrayList(3) }
-          if (wId !in list) list.add(wId)
-        }
+      }
+      val pairs = nextPairs[k].orEmpty()
+      for ((nid, wId) in pairs) {
+        val list = nodeToWays.getOrPut(nid) { ArrayList(3) }
+        if (wId !in list) list.add(wId)
       }
     }
+
+    // Run T-junction & ramp endpoint planarization when multiple tiles merge (and on un-planarized graphs)
+    val planarizeStats =
+      if (mergedWays.size >= 2) {
+        TileEndpointPlanarizer.planarize(
+          nodes = mergedNodes,
+          ways = mergedWays,
+          nodeToWays = nodeToWays,
+          loadedTiles = loadedTiles,
+          wayTileKeyOverrides = wayOriginTileById,
+        )
+      } else {
+        PlanarizeStats()
+      }
 
     val borderStitchStats =
       if (loadedTiles.isNotEmpty()) {
@@ -500,24 +714,23 @@ class RoadGraphRepository(
     val waysPerTileMax = if (tileWayCounts.isEmpty()) 0 else tileWayCounts.max()
     val waysPerTileAvg = if (tileWayCounts.isEmpty()) 0.0 else tileWayCounts.sum().toDouble() / tileWayCounts.size.toDouble()
 
-    // 2. Overpass enrichment (Overpass enriches overlapping tile tags + adds missing ways without deleting)
+    // 2. Overpass enrichment
     var hasOverpass = false
-    if (overpassEntries.isNotEmpty()) {
+    if (overpassMap.isNotEmpty()) {
       val baseIndex =
         if (mergedWays.isNotEmpty()) {
           val tempBase = RoadGraph(mergedNodes, mergedWays, nodeToWays, latestFetchedAt, allFromCache, GraphDataSource.TILES, loadedTiles)
-          SpatialGraphIndex.build(tempBase, versionCounter, "tiles")
+          SpatialGraphIndex.build(tempBase, captured.entriesVersion, "tiles")
         } else {
           null
         }
-      for ((_, cell) in overpassEntries) {
+      for ((_, cell) in overpassMap) {
         for (p in cell.pois) allPois[p.id] = p
         if (cell.graph.ways.isEmpty() && cell.graph.nodes.isEmpty()) continue
         hasOverpass = true
         latestFetchedAt = max(latestFetchedAt, cell.fetchedAtMs)
         if (!cell.graph.fromCache) allFromCache = false
 
-        // Keep Overpass node tags
         for ((nid, oNode) in cell.graph.nodes) {
           val existing = mergedNodes[nid]
           mergedNodes[nid] =
@@ -572,15 +785,13 @@ class RoadGraphRepository(
       }
     }
 
-    // 3. Live-map fallback: whenever user position has NO tile/Overpass edge within 150 m,
-    // merge fallback ways within 400 m of user without ever overriding existing tile/Overpass ways.
-    val evalCenter = currentFallbackEvalCenter ?: currentKeepCenter
+    // 3. Live-map fallback
+    val evalCenter = captured.evalCenter
     val hasPrimaryEdgeWithin150m =
       if (evalCenter != null) hasWayWithinRadius(mergedWays.values, evalCenter, 150.0)
       else mergedWays.isNotEmpty()
-    lastFallbackEvalPublishedCenter = evalCenter
 
-    val fallback = mapFallbackGraph
+    val fallback = captured.mapFallback
     var mapFallbackWaysAdded = 0
     if (!hasPrimaryEdgeWithin150m && fallback != null && fallback.ways.isNotEmpty()) {
       for ((_, fWay) in fallback.ways) {
@@ -623,7 +834,7 @@ class RoadGraphRepository(
       }
     }
 
-    val hasTiles = tileEntries.values.any { it.graph.ways.isNotEmpty() }
+    val hasTiles = tileEntriesMap.values.any { it.graph.ways.isNotEmpty() }
     val source =
       when {
         hasTiles && hasOverpass -> GraphDataSource.MERGED
@@ -645,6 +856,17 @@ class RoadGraphRepository(
         else -> "none"
       }
 
+    // Aggregate planarize stats from individual tiles + cross-tile planarize pass
+    val aggVertexMerges = tileEntriesMap.values.sumOf { it.graph.planarizeStats.vertexMerges } + planarizeStats.vertexMerges
+    val aggSplits = tileEntriesMap.values.sumOf { it.graph.planarizeStats.segmentSplits } + planarizeStats.segmentSplits
+    val aggMismatch = tileEntriesMap.values.sumOf { it.graph.planarizeStats.rejectedLayerMismatches } + planarizeStats.rejectedLayerMismatches
+    val combinedPlanarizeStats =
+      PlanarizeStats(
+        vertexMerges = aggVertexMerges,
+        segmentSplits = aggSplits,
+        rejectedLayerMismatches = aggMismatch,
+      )
+
     val combinedGraph =
       RoadGraph(
         nodes = mergedNodes,
@@ -655,39 +877,39 @@ class RoadGraphRepository(
         source = source,
         loadedTiles = loadedTiles,
         borderStitchStats = borderStitchStats,
+        planarizeStats = combinedPlanarizeStats,
+        hasBeenPlanarized = mergedWays.isNotEmpty(),
       )
-    versionCounter++
-    val index = SpatialGraphIndex.build(combinedGraph, versionCounter, sourceLabel)
-    val snap =
-      GraphSnapshot(
-        version = versionCounter,
-        graph = combinedGraph,
-        index = index,
-        sourceLabel = sourceLabel,
-        publishedAtMs = System.currentTimeMillis(),
-        memoryTileCount = tileEntries.size,
-        overpassCellCount = overpassEntries.size,
-        memoryHits = memoryHits,
-        memoryMisses = memoryMisses,
-        evictions = evictionCount,
-        tileFetchedAtMs = tileTimestamps,
-        emptyDecodedTileKeys = emptyKeys,
-        pois = allPois.values.toList(),
-        labelsByTile = labelsByTile,
-        overpassEdgeCount = overpassEdgeCount,
-        tileEdgeCount = tileEdgeCount,
-        idCollisions = idCollisions,
-        danglingNodeRefs = danglingNodeRefs,
-        waysPerTileMin = waysPerTileMin,
-        waysPerTileAvg = waysPerTileAvg,
-        waysPerTileMax = waysPerTileMax,
-        mapFallbackUsed = usedFallback,
-        mapFallbackWaysAdded = mapFallbackWaysAdded,
-        hasPrimaryEdgeWithin150m = hasPrimaryEdgeWithin150m,
-        borderStitchStats = borderStitchStats,
-      )
-    _snapshot.value = snap
-    return snap
+    val buildSeq = captured.entriesVersion + 1L
+    val index = SpatialGraphIndex.build(combinedGraph, buildSeq, sourceLabel)
+    return GraphSnapshot(
+      version = buildSeq,
+      graph = combinedGraph,
+      index = index,
+      sourceLabel = sourceLabel,
+      publishedAtMs = System.currentTimeMillis(),
+      memoryTileCount = tileEntriesMap.size,
+      overpassCellCount = overpassMap.size,
+      memoryHits = captured.memoryHits,
+      memoryMisses = captured.memoryMisses,
+      evictions = captured.evictionCount,
+      tileFetchedAtMs = tileTimestamps,
+      emptyDecodedTileKeys = emptyKeys,
+      pois = allPois.values.toList(),
+      labelsByTile = labelsByTile,
+      overpassEdgeCount = overpassEdgeCount,
+      tileEdgeCount = tileEdgeCount,
+      idCollisions = idCollisions,
+      danglingNodeRefs = danglingNodeRefs,
+      waysPerTileMin = waysPerTileMin,
+      waysPerTileAvg = waysPerTileAvg,
+      waysPerTileMax = waysPerTileMax,
+      mapFallbackUsed = usedFallback,
+      mapFallbackWaysAdded = mapFallbackWaysAdded,
+      hasPrimaryEdgeWithin150m = hasPrimaryEdgeWithin150m,
+      borderStitchStats = borderStitchStats,
+      planarizeStats = combinedPlanarizeStats,
+    )
   }
 
   private fun mergeTagsPreferOverpass(tileTags: OsmTags, ovTags: OsmTags): OsmTags =

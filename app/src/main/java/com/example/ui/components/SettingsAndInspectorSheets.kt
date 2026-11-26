@@ -110,9 +110,11 @@ import com.example.BuildConfig
 import com.example.R
 import com.example.data.model.BilingualName
 import com.example.data.model.BranchStatus
+import com.example.data.model.ChaseCameraDistance
 import com.example.data.model.DeveloperOrientation
 import com.example.data.model.FeatureCensusEntry
 import com.example.data.model.FeatureType
+import com.example.data.model.LadderOrder
 import com.example.data.model.LandscapePanelSide
 import com.example.data.model.PanelStyle
 import com.example.data.model.RelativeDirection
@@ -149,6 +151,10 @@ fun SettingsBottomSheet(
   onSelectHorizon: (Double) -> Unit = {},
   onToggleShowMinorJunctions: (Boolean) -> Unit = {},
   onToggleLandmarksAhead: (Boolean) -> Unit = {},
+  onSelectLadderOrder: (LadderOrder) -> Unit = {},
+  onToggleChaseCamera: (Boolean) -> Unit = {},
+  onSelectChaseCameraDistance: (ChaseCameraDistance) -> Unit = {},
+  onTogglePerformanceMode: (Boolean) -> Unit = {},
   onToggleShowGraphEdges: (Boolean) -> Unit = {},
   onResetDebugOverrides: () -> Unit,
   onClearCache: () -> Unit,
@@ -250,6 +256,57 @@ fun SettingsBottomSheet(
           checked = uiState.settings.reduceTransparencyEnabled,
           onCheckedChange = onToggleReduceTransparency,
           switchTestTag = "reduce_transparency_switch",
+        )
+
+        SettingsSwitchRow(
+          title = stringResource(R.string.settings_chase_camera_title),
+          subtitle = stringResource(R.string.settings_chase_camera_sub),
+          checked = uiState.settings.chaseCameraEnabled,
+          onCheckedChange = onToggleChaseCamera,
+          switchTestTag = "chase_camera_switch",
+        )
+
+        Text(
+          text = stringResource(R.string.settings_camera_distance),
+          fontSize = 14.sp,
+          fontWeight = FontWeight.Medium,
+          color =
+            if (uiState.settings.chaseCameraEnabled) MaterialTheme.colorScheme.onSurface
+            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+        )
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          ThemeOptionChip(
+            label = stringResource(R.string.camera_dist_close),
+            selected = uiState.settings.chaseCameraDistance == ChaseCameraDistance.CLOSE,
+            enabled = uiState.settings.chaseCameraEnabled,
+            onClick = { onSelectChaseCameraDistance(ChaseCameraDistance.CLOSE) },
+            modifier = Modifier.weight(1f).testTag("chase_dist_close"),
+          )
+          ThemeOptionChip(
+            label = stringResource(R.string.camera_dist_normal),
+            selected = uiState.settings.chaseCameraDistance == ChaseCameraDistance.NORMAL,
+            enabled = uiState.settings.chaseCameraEnabled,
+            onClick = { onSelectChaseCameraDistance(ChaseCameraDistance.NORMAL) },
+            modifier = Modifier.weight(1f).testTag("chase_dist_normal"),
+          )
+          ThemeOptionChip(
+            label = stringResource(R.string.camera_dist_far),
+            selected = uiState.settings.chaseCameraDistance == ChaseCameraDistance.FAR,
+            enabled = uiState.settings.chaseCameraEnabled,
+            onClick = { onSelectChaseCameraDistance(ChaseCameraDistance.FAR) },
+            modifier = Modifier.weight(1f).testTag("chase_dist_far"),
+          )
+        }
+
+        SettingsSwitchRow(
+          title = stringResource(R.string.settings_performance_mode),
+          subtitle = stringResource(R.string.settings_performance_mode_sub),
+          checked = uiState.settings.performanceModeEnabled,
+          onCheckedChange = onTogglePerformanceMode,
+          switchTestTag = "performance_mode_switch",
         )
       }
 
@@ -362,6 +419,30 @@ fun SettingsBottomSheet(
             selected = effectiveLandscapeSide == LandscapePanelSide.RIGHT,
             onClick = { onSelectLandscapePanelSide(LandscapePanelSide.RIGHT) },
             modifier = Modifier.weight(1f).testTag("layout_side_right"),
+          )
+        }
+
+        Text(
+          text = stringResource(R.string.ladder_order_label),
+          fontSize = 14.sp,
+          fontWeight = FontWeight.Medium,
+          color = MaterialTheme.colorScheme.onSurface,
+        )
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          ThemeOptionChip(
+            label = stringResource(R.string.ladder_nearest_bottom),
+            selected = uiState.settings.ladderOrder == LadderOrder.NEAREST_AT_BOTTOM,
+            onClick = { onSelectLadderOrder(LadderOrder.NEAREST_AT_BOTTOM) },
+            modifier = Modifier.weight(1f).testTag("ladder_order_bottom"),
+          )
+          ThemeOptionChip(
+            label = stringResource(R.string.ladder_nearest_top),
+            selected = uiState.settings.ladderOrder == LadderOrder.NEAREST_AT_TOP,
+            onClick = { onSelectLadderOrder(LadderOrder.NEAREST_AT_TOP) },
+            modifier = Modifier.weight(1f).testTag("ladder_order_top"),
           )
         }
       }
@@ -616,25 +697,40 @@ private fun ThemeOptionChip(
   selected: Boolean,
   onClick: () -> Unit,
   modifier: Modifier = Modifier,
+  enabled: Boolean = true,
 ) {
   val interactionSource = rememberPressHapticInteractionSource()
   val pressed by interactionSource.collectIsPressedAsState()
   val bg =
     when {
+      !enabled && selected -> MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+      !enabled -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
       selected && pressed -> MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
       selected -> MaterialTheme.colorScheme.primary
       pressed -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f)
       else -> MaterialTheme.colorScheme.surfaceVariant
     }
-  val fg = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+  val fg =
+    when {
+      !enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+      selected -> MaterialTheme.colorScheme.onPrimary
+      else -> MaterialTheme.colorScheme.onSurface
+    }
   Button(
     onClick = {
       TouchTelemetry.recordControlHandled("theme_or_layout_chip_$label")
       onClick()
     },
+    enabled = enabled,
     interactionSource = interactionSource,
     shape = CircleShape,
-    colors = ButtonDefaults.buttonColors(containerColor = bg, contentColor = fg),
+    colors =
+      ButtonDefaults.buttonColors(
+        containerColor = bg,
+        contentColor = fg,
+        disabledContainerColor = bg,
+        disabledContentColor = fg,
+      ),
     elevation = null,
     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
     modifier = modifier.height(48.dp),
@@ -643,8 +739,9 @@ private fun ThemeOptionChip(
       text = label,
       color = fg,
       fontWeight = FontWeight.SemiBold,
-      fontSize = 15.sp,
+      fontSize = 14.sp,
       maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
       modifier = Modifier.innerPressScale(interactionSource),
     )
   }
@@ -1503,6 +1600,61 @@ fun GraphInspectorBottomSheet(
                       lineHeight = 11.sp,
                       color = roadColors.unverifiedText,
                       modifier = Modifier.testTag("inspector_unreachable_links"),
+                    )
+                  }
+                  val pStats = uiState.pipelineDiagnostics.planarizeStats
+                  Text(
+                    text =
+                      String.format(
+                        Locale.US,
+                        "Planarize: merges=%d splits=%d layerReject=%d unsnapped30m=%d%s",
+                        pStats.vertexMerges,
+                        pStats.segmentSplits,
+                        pStats.rejectedLayerMismatches,
+                        pStats.unsnappedCorridorEndpoints,
+                        if (uiState.pipelineDiagnostics.isReducedHorizon) " · reduced horizon" else "",
+                      ),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.sp,
+                    lineHeight = 11.sp,
+                    color =
+                      if (pStats.unsnappedCorridorEndpoints > 0) roadColors.unverifiedText
+                      else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("inspector_planarize_stats"),
+                  )
+                  pStats.unsnappedSamples.take(3).forEachIndexed { sIdx, sample ->
+                    Text(
+                      text = "  unsnapped[${sIdx + 1}]: $sample",
+                      fontFamily = FontFamily.Monospace,
+                      fontSize = 9.sp,
+                      lineHeight = 11.sp,
+                      color = roadColors.unverifiedText,
+                    )
+                  }
+                  val diag = uiState.pipelineDiagnostics
+                  Text(
+                    text =
+                      String.format(
+                        Locale.US,
+                        "Main watchdog: stalls>200ms=%d max=%dms lockWait=%.2fms lockHold=%.2fms",
+                        diag.watchdogBlockedCount,
+                        diag.watchdogMaxBlockMs,
+                        diag.repoLockMaxWaitMs,
+                        diag.repoLockMaxHoldMs,
+                      ),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.sp,
+                    lineHeight = 11.sp,
+                    color = if (diag.watchdogBlockedCount > 0) roadColors.blockedText else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag("inspector_watchdog_stats"),
+                  )
+                  diag.watchdogTopOffenders.take(5).forEachIndexed { oIdx, offender ->
+                    Text(
+                      text = "  offender[${oIdx + 1}]: $offender",
+                      fontFamily = FontFamily.Monospace,
+                      fontSize = 9.sp,
+                      lineHeight = 11.sp,
+                      color = roadColors.blockedText,
                     )
                   }
                 }
@@ -3171,6 +3323,20 @@ internal fun buildInspectorPlainText(uiState: RoadHudUiState): String {
   if (uiState.pipelineDiagnostics.horizonStatsSummary.isNotBlank()) {
     lines += "horizon: ${uiState.pipelineDiagnostics.horizonStatsSummary}"
   }
+  val pStats = uiState.pipelineDiagnostics.planarizeStats
+  lines +=
+    String.format(
+      Locale.US,
+      "planarize: merges=%d splits=%d layerRej=%d unsnap30m=%d | watchdog=%d max=%dms wait=%.2fms hold=%.2fms",
+      pStats.vertexMerges,
+      pStats.segmentSplits,
+      pStats.rejectedLayerMismatches,
+      pStats.unsnappedCorridorEndpoints,
+      uiState.pipelineDiagnostics.watchdogBlockedCount,
+      uiState.pipelineDiagnostics.watchdogMaxBlockMs,
+      uiState.pipelineDiagnostics.repoLockMaxWaitMs,
+      uiState.pipelineDiagnostics.repoLockMaxHoldMs,
+    )
   computeDiagnosticReason(uiState)?.let { reason ->
     lines += "status=${reason.take(96)}"
   }

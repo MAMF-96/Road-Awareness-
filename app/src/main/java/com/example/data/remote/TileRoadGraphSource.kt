@@ -28,6 +28,7 @@ import com.example.data.model.TileNameLabelRecord
 import com.example.data.model.TileUrlResolutionInfo
 import com.example.data.model.TravelMode
 import com.example.domain.GeoMath
+import com.example.domain.TileEndpointPlanarizer
 import java.io.File
 import java.io.IOException
 import java.util.Locale
@@ -752,6 +753,102 @@ class TileRoadGraphSource(
         send(Result.failure(IOException(failures.firstOrNull() ?: "Tile fetch failed")))
       }
     }.flowOn(Dispatchers.IO)
+
+  suspend fun fetchMissingTileKeys(
+    tileKeys: Set<String>,
+    mode: TravelMode,
+  ): List<DecodedTileArtifact> =
+    withContext(Dispatchers.IO) {
+      if (tileKeys.isEmpty() || DebugNetworkSimulator.isTilesBlocked() || DebugNetworkSimulator.isOfflineBlocked()) {
+        return@withContext emptyList()
+      }
+      val parsed =
+        tileKeys.mapNotNull { key ->
+          val parts = key.split('_')
+          if (parts.size != 3) return@mapNotNull null
+          val z = parts[0].toIntOrNull() ?: return@mapNotNull null
+          val x = parts[1].toIntOrNull() ?: return@mapNotNull null
+          val y = parts[2].toIntOrNull() ?: return@mapNotNull null
+          ZxyTile(z, x, y)
+        }.take(6)
+      if (parsed.isEmpty()) return@withContext emptyList()
+
+      val out = ArrayList<DecodedTileArtifact>(parsed.size)
+      val needNet = ArrayList<ZxyTile>()
+      val cachedRows = tileCacheDao.getTiles(parsed.map { it.key }).associateBy { it.tileKey }
+      for (t in parsed) {
+        val binArt = binaryCodec.readIfValid(t.key, mode, ignoreTtl = false)
+        if (binArt != null) {
+          out += binArt
+          continue
+        }
+        val row = cachedRows[t.key]
+        if (row != null && (clockMs() - row.fetchedAtMs) < AppConfig.CACHE_TTL_MS) {
+          val dec = decodeEntityToArtifact(row, mode, fromCache = true, clockMs)
+          if (dec.isSuccess) {
+            val art = dec.getOrThrow()
+            binaryCodec.write(art, mode)
+            out += art
+            continue
+          }
+        }
+        needNet += t
+      }
+      if (needNet.isEmpty()) return@withContext out
+
+      val vecSrc = resolveVectorSource(forceNetwork = false).getOrNull() ?: return@withContext out
+      if (!vecSrc.hasTransportationLayer) return@withContext out
+
+      for (tile in needNet) {
+        val urlY = if (vecSrc.scheme.equals("tms", ignoreCase = true)) (1 shl tile.z) - 1 - tile.y else tile.y
+        val tileUrl =
+          vecSrc.tileUrlTemplate
+            .replace("{z}", tile.z.toString())
+            .replace("{x}", tile.x.toString())
+            .replace("{y}", urlY.toString())
+        runCatching {
+          val req =
+            Request.Builder()
+              .url(tileUrl)
+              .header("User-Agent", AppConfig.USER_AGENT)
+              .header("Accept", "*/*")
+              .header("X-Road-Tile-Request", "1")
+              .get()
+              .build()
+          client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return@use
+            val bytes = resp.body?.bytes()
+            val nowTs = clockMs()
+            if (bytes != null && bytes.isNotEmpty()) {
+              val entity = TileCacheEntity(tile.key, tile.z, tile.x, tile.y, bytes, nowTs)
+              tileCacheDao.upsertTiles(listOf(entity))
+              val dec = decodeEntityToArtifact(entity, mode, fromCache = false, clockMs)
+              if (dec.isSuccess) {
+                val art = dec.getOrThrow()
+                binaryCodec.write(art, mode)
+                out += art
+              }
+            } else {
+              val emptyBounds = computeTileBounds(tile.z, tile.x, tile.y)
+              out +=
+                DecodedTileArtifact(
+                  tileKey = tile.key,
+                  z = tile.z,
+                  x = tile.x,
+                  y = tile.y,
+                  bounds = emptyBounds,
+                  graph = RoadGraph(emptyMap(), emptyMap(), emptyMap(), nowTs, fromCache = false, GraphDataSource.TILES, listOf(emptyBounds)),
+                  labels = emptyList(),
+                  pois = emptyList(),
+                  fetchedAtMs = nowTs,
+                  isEmptyDecoded = true,
+                )
+            }
+          }
+        }
+      }
+      out
+    }
 
   override suspend fun fetchCorridorGraph(
     center: GeoPoint,
@@ -1483,6 +1580,14 @@ class TileRoadGraphSource(
           }
         }
 
+      val planarizeStats =
+        TileEndpointPlanarizer.planarize(
+          nodes = nodes,
+          ways = ways,
+          nodeToWays = nodeToWays,
+          loadedTiles = loadedTiles,
+        )
+
       val stitchStats =
         if (loadedTiles.isNotEmpty()) {
           stitchCrossTileBordersAndComputeStats(
@@ -1504,6 +1609,8 @@ class TileRoadGraphSource(
         source = graphSource,
         loadedTiles = loadedTiles,
         borderStitchStats = stitchStats,
+        planarizeStats = planarizeStats,
+        hasBeenPlanarized = true,
       )
     }
 
@@ -1618,7 +1725,7 @@ class TileRoadGraphSource(
       }
     }
 
-    const val DECODER_VERSION = 3
+    const val DECODER_VERSION = 4
     const val WAY_NS_TILES = 1
     const val WAY_NS_MAP = 2
     const val MAX_WAY_COUNTER = 1L shl 20

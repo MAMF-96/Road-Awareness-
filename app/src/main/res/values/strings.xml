@@ -259,4 +259,24 @@
     <string name="entry_unverified">Unverified</string>
     <string name="found_match_badge">Found</string>
     <string name="found_target_offscreen_format">Found · %1$s</string>
+
+    <!-- Road Ladder, Chase Camera & Performance Mode -->
+    <string name="ladder_title">Road Ladder</string>
+    <string name="ladder_order_label">Ladder order</string>
+    <string name="ladder_nearest_bottom">Nearest at bottom</string>
+    <string name="ladder_nearest_top">Nearest at top</string>
+    <string name="ladder_more_rows_format">+%1$d</string>
+    <string name="ladder_you_here">You</string>
+    <string name="ladder_continues_loading">Road continues (loading)</string>
+    <string name="ladder_ramp_to_format">ramp to %1$s</string>
+    <string name="ladder_unnamed_street">شارع بلا اسم معروف / Unnamed street</string>
+    <string name="ladder_unknown_dest">غير معروف / unknown</string>
+    <string name="settings_chase_camera_title">Chase camera (3rd person view)</string>
+    <string name="settings_chase_camera_sub">Tilted closer behind your vehicle with smooth curve look-ahead</string>
+    <string name="settings_camera_distance">Camera distance</string>
+    <string name="camera_dist_close">Close</string>
+    <string name="camera_dist_normal">Normal</string>
+    <string name="camera_dist_far">Far</string>
+    <string name="settings_performance_mode">Performance mode</string>
+    <string name="settings_performance_mode_sub">Keep 3D buildings off to improve frame rate</string>
 </resources>

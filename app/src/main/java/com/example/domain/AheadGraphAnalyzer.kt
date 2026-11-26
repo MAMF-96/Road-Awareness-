@@ -63,6 +63,16 @@ object AheadGraphAnalyzer {
     val showMinorJunctions: Boolean,
     val landmarksEnabled: Boolean,
     val poisHash: Int,
+    val hasBeenPlanarized: Boolean,
+  )
+
+  private data class CycleCacheKey(
+    val fetchedAtMs: Long,
+    val wayCount: Int,
+    val nodeCount: Int,
+    val source: GraphDataSource,
+    val waysSignatureHash: Int,
+    val hasBeenPlanarized: Boolean,
   )
 
   private val compositeCacheLock = Any()
@@ -71,10 +81,16 @@ object AheadGraphAnalyzer {
       override fun removeEldestEntry(eldest: MutableMap.MutableEntry<CompositeCacheKey, AheadAnalysisResult>?): Boolean =
         size > MAX_COMPOSITE_CACHE_ENTRIES
     }
+  private val roundaboutCycleCache =
+    object : LinkedHashMap<CycleCacheKey, RoundaboutCycleInfo>(4, 0.75f, true) {
+      override fun removeEldestEntry(eldest: MutableMap.MutableEntry<CycleCacheKey, RoundaboutCycleInfo>?): Boolean =
+        size > 4
+    }
 
   fun clearCompositeCache() {
     synchronized(compositeCacheLock) {
       compositeAnalysisCache.clear()
+      roundaboutCycleCache.clear()
     }
   }
 
@@ -175,8 +191,16 @@ object AheadGraphAnalyzer {
     showMinorJunctions: Boolean = true,
     pois: List<PoiItem> = emptyList(),
     landmarksEnabled: Boolean = true,
+    budgetMs: Long = 150L,
+    shouldAbort: () -> Boolean = { false },
   ): AheadAnalysisResult {
-    val maxLookahead = computeLookaheadMeters(mode, speedMps, configuredHorizonMeters)
+    val startNs = System.nanoTime()
+    val deadlineNs =
+      if (budgetMs in 1L..30_000L) startNs + budgetMs * 1_000_000L
+      else Long.MAX_VALUE
+    val isReducedHorizon = graph.ways.size > 8_000
+    val rawLookahead = computeLookaheadMeters(mode, speedMps, configuredHorizonMeters)
+    val maxLookahead = if (isReducedHorizon) min(rawLookahead, 3_000.0) else rawLookahead
     val compositeCorridorMeters =
       if (mode == TravelMode.DRIVING) DRIVING_COMPOSITE_CORRIDOR_M else WALKING_COMPOSITE_CORRIDOR_M
     val cacheKey =
@@ -198,18 +222,21 @@ object AheadGraphAnalyzer {
         showMinorJunctions = showMinorJunctions,
         landmarksEnabled = landmarksEnabled,
         poisHash = pois.size * 31 + pois.firstOrNull()?.id.hashCode(),
+        hasBeenPlanarized = graph.hasBeenPlanarized,
       )
     synchronized(compositeCacheLock) {
       compositeAnalysisCache[cacheKey]?.let { return it }
     }
 
-    val traceLimit = maxOf(maxLookahead, compositeCorridorMeters)
+    val traceLimit = min(maxOf(maxLookahead, compositeCorridorMeters), if (isReducedHorizon) 3_000.0 else Double.MAX_VALUE)
     val features = mutableListOf<RoadFeature>()
     val visitedWayIds = mutableSetOf<Long>()
     val visitedJunctionNodes = mutableSetOf<Long>()
     val visitedPointNodes = mutableSetOf<Long>()
     val visitedRoundaboutCycles = mutableSetOf<Int>()
     val tracedSegments = mutableListOf<TracedSegment>()
+    val loadingAheadTileKeys = LinkedHashSet<String>()
+    var isPartialBudgetResult = false
 
     val roundaboutInfo = detectGeometricCycles(graph)
 
@@ -264,6 +291,10 @@ object AheadGraphAnalyzer {
     }
 
     while (accumulatedDist < traceLimit && stepGuard++ < 260) {
+      if (shouldAbort() || System.nanoTime() > deadlineNs) {
+        isPartialBudgetResult = true
+        break
+      }
       visitedWayIds += currentWay.id
       val indices =
         if (forward) {
@@ -429,7 +460,9 @@ object AheadGraphAnalyzer {
       }
 
       if (accumulatedDist >= traceLimit || lastTraversedNodeId == null) {
-        if (accumulatedDist < traceLimit && isNearUnloadedOrPendingTileBorder(prevPoint, graph, currentWay.id)) {
+        if (accumulatedDist < traceLimit &&
+          isNearUnloadedOrPendingTileBorder(prevPoint, graph, currentWay.id, loadingAheadTileKeys)
+        ) {
           horizonStoppedAtUnloadedBorder = true
         }
         break
@@ -447,7 +480,7 @@ object AheadGraphAnalyzer {
         )
       if (nextHop == null) {
         val stopPt = graph.nodes[lastTraversedNodeId]?.point ?: prevPoint
-        if (isNearUnloadedOrPendingTileBorder(stopPt, graph, currentWay.id)) {
+        if (isNearUnloadedOrPendingTileBorder(stopPt, graph, currentWay.id, loadingAheadTileKeys)) {
           horizonStoppedAtUnloadedBorder = true
         }
         break
@@ -506,38 +539,51 @@ object AheadGraphAnalyzer {
     }
 
     // 3b) Path-based curve & S-bend detector (5m resample, 40m sliding window)
-    val curveFeatures =
-      detectPathCurves(
-        matched = matched,
-        tracedSegments = tracedSegments,
-        maxLookahead = maxLookahead,
-      )
-    features += curveFeatures
+    if (!shouldAbort() && System.nanoTime() <= deadlineNs) {
+      val curveFeatures =
+        detectPathCurves(
+          matched = matched,
+          tracedSegments = tracedSegments,
+          maxLookahead = maxLookahead,
+        )
+      features += curveFeatures
+    } else {
+      isPartialBudgetResult = true
+    }
 
     // 4) Grade-separated Overpass / Underpass crossings (ways crossing user's path WITHOUT a shared node)
-    detectGradeSeparatedCrossings(
-      graph = graph,
-      tracedSegments = tracedSegments,
-      maxLookahead = traceLimit,
-      existingFeatures = features,
-    )
+    if (!shouldAbort() && System.nanoTime() <= deadlineNs) {
+      detectGradeSeparatedCrossings(
+        graph = graph,
+        tracedSegments = tracedSegments,
+        maxLookahead = traceLimit,
+        existingFeatures = features,
+      )
+    } else {
+      isPartialBudgetResult = true
+    }
 
     // 5) Composite features strictly on the corridor ahead (Driving 800m, Walking 250m)
     val dividedRoadInfo = detectDividedRoadPartner(graph, matched, tracedSegments, mode)
     val nearbyUnreachableLinks = mutableListOf<String>()
     val groupedFeatures =
-      applyCompositeGrouping(
-        graph = graph,
-        matched = matched,
-        tracedSegments = tracedSegments.filter { it.cumDistAtP1 <= compositeCorridorMeters },
-        fullTracedSegments = tracedSegments,
-        rawFeatures = features,
-        dividedRoad = dividedRoadInfo,
-        compositeCorridorMeters = compositeCorridorMeters,
-        maxStandaloneLookahead = maxLookahead,
-        mode = mode,
-        unreachableLinkLogsOut = nearbyUnreachableLinks,
-      )
+      if (!shouldAbort() && System.nanoTime() <= deadlineNs) {
+        applyCompositeGrouping(
+          graph = graph,
+          matched = matched,
+          tracedSegments = tracedSegments.filter { it.cumDistAtP1 <= compositeCorridorMeters },
+          fullTracedSegments = tracedSegments,
+          rawFeatures = features,
+          dividedRoad = dividedRoadInfo,
+          compositeCorridorMeters = compositeCorridorMeters,
+          maxStandaloneLookahead = maxLookahead,
+          mode = mode,
+          unreachableLinkLogsOut = nearbyUnreachableLinks,
+        )
+      } else {
+        isPartialBudgetResult = true
+        features.sortedBy { it.distanceMeters }
+      }
 
     val corridorWorldPts = ArrayList<GeoPoint>(tracedSegments.size + 1)
     corridorWorldPts += matched.snappedPoint
@@ -607,21 +653,35 @@ object AheadGraphAnalyzer {
       tracedSegments.lastOrNull()?.let { (it.cumDistAtP1 + it.segLenMeters).coerceAtMost(maxLookahead) } ?: 0.0
 
     val landmarksAhead =
-      if (landmarksEnabled && pois.isNotEmpty() && tracedSegments.isNotEmpty()) {
+      if (landmarksEnabled && pois.isNotEmpty() && tracedSegments.isNotEmpty() && !shouldAbort() && System.nanoTime() <= deadlineNs) {
         extractLandmarksAhead(pois, tracedSegments, maxLookahead, mode)
       } else {
         emptyList()
       }
 
+    val nearGuaranteeM = if (mode == TravelMode.DRIVING) 600.0 else 250.0
     val featureTimeline =
       filteredFeatures.mapIndexed { idx, rawFeat ->
         val mapped = if (idx < indexed.size) indexed[idx] else rawFeat
-        val branchTitle =
+        val rawTitle =
           mapped.branches
             .firstOrNull { it.name.hasAny }?.name
             ?: BilingualName.fromOsmTags(mapped.osmTags)
+        val branchTitle =
+          if (!rawTitle.hasAny && mapped.distanceMeters <= nearGuaranteeM && mapped.branches.isNotEmpty()) {
+            BilingualName(arabic = "شارع بلا اسم معروف", english = "Unnamed street", ref = null)
+          } else {
+            rawTitle
+          }
         val branchNames =
-          mapped.branches.mapNotNull { br -> br.name.primaryText ?: br.name.ref }.distinct()
+          mapped.branches.mapNotNull { br ->
+            val n = br.name.primaryText ?: br.name.ref
+            if (n.isNullOrBlank() && mapped.distanceMeters <= nearGuaranteeM) {
+              "Unnamed street"
+            } else {
+              n
+            }
+          }.distinct()
         val summary =
           when {
             branchNames.isNotEmpty() -> branchNames.take(2).joinToString(" · ")
@@ -649,6 +709,51 @@ object AheadGraphAnalyzer {
         )
       }
 
+    // Part C: Named streets along the corridor within 60 m laterally (angle >= 30 deg)
+    val passByEntries =
+      if (!shouldAbort() && System.nanoTime() <= deadlineNs && tracedSegments.isNotEmpty()) {
+        val corridorWayIds = tracedSegments.mapTo(HashSet()) { it.way.id }
+        val corridorNodeDists = HashMap<Long, Double>(tracedSegments.size * 2)
+        for (seg in tracedSegments) {
+          seg.nodeId1?.let { nid ->
+            val prev = corridorNodeDists[nid]
+            if (prev == null || seg.cumDistAtP1 < prev) corridorNodeDists[nid] = seg.cumDistAtP1
+          }
+          seg.nodeId2?.let { nid ->
+            val endD = seg.cumDistAtP1 + seg.segLenMeters
+            val prev = corridorNodeDists[nid]
+            if (prev == null || endD < prev) corridorNodeDists[nid] = endD
+          }
+        }
+        val samples =
+          tracedSegments.map { s ->
+            PassByStreetDetector.CorridorSample(
+              p1 = s.p1,
+              p2 = s.p2,
+              distAtP1 = s.cumDistAtP1,
+              segLen = s.segLenMeters,
+              bearingDeg = s.bearingDeg,
+              way = s.way,
+              nodeId1 = s.nodeId1,
+              nodeId2 = s.nodeId2,
+            )
+          }
+        PassByStreetDetector.detectPassByStreets(
+          graph = graph,
+          corridorSamples = samples,
+          corridorWayIds = corridorWayIds,
+          corridorNodeDists = corridorNodeDists,
+          existingFeatures = filteredFeatures,
+          dividedRoad = dividedRoadInfo,
+          maxLookaheadMeters = maxLookahead,
+          mode = mode,
+          deadlineNs = deadlineNs,
+        )
+      } else {
+        if (System.nanoTime() > deadlineNs) isPartialBudgetResult = true
+        emptyList()
+      }
+
     val landmarkTimeline =
       landmarksAhead.map { lm ->
         AheadTimelineEntry(
@@ -663,7 +768,7 @@ object AheadGraphAnalyzer {
         )
       }
 
-    val fullTimeline = (featureTimeline + landmarkTimeline).sortedBy { it.distanceMeters }
+    val fullTimeline = (featureTimeline + passByEntries + landmarkTimeline).sortedBy { it.distanceMeters }
 
     val tracedPathLog = buildTracedPathSegmentLogs(tracedSegments)
 
@@ -679,9 +784,14 @@ object AheadGraphAnalyzer {
         tracedPathSegments = tracedPathLog,
         horizonStoppedAtUnloadedBorder = horizonStoppedAtUnloadedBorder,
         nearbyUnreachableLinks = nearbyUnreachableLinks.distinct(),
+        isPartialBudgetResult = isPartialBudgetResult,
+        isReducedHorizon = isReducedHorizon,
+        loadingAheadTileKeys = loadingAheadTileKeys.toList(),
       )
-    synchronized(compositeCacheLock) {
-      compositeAnalysisCache[cacheKey] = result
+    if (!isPartialBudgetResult) {
+      synchronized(compositeCacheLock) {
+        compositeAnalysisCache[cacheKey] = result
+      }
     }
     return result
   }
@@ -1825,53 +1935,92 @@ object AheadGraphAnalyzer {
     pt: GeoPoint,
     graph: RoadGraph,
     currentWayId: Long? = null,
+    missingTileKeysOut: MutableSet<String>? = null,
   ): Boolean {
-    val loaded = graph.loadedTiles
-    if (loaded.isEmpty()) return false
-    val loadedByKey = loaded.associateBy { "${it.z}_${it.x}_${it.y}" }
-    val thresholdM = 6.0
+    // 1) If ANY other way has an endpoint within 3.0 m of this endpoint -> treat as unsnapped continuation, never dead end.
+    for ((wid, w) in graph.ways) {
+      if (wid == currentWayId || w.points.isEmpty()) continue
+      val first = w.points.first()
+      val last = w.points.last()
+      if (GeoMath.haversineMeters(pt, first) <= 3.0 || GeoMath.haversineMeters(pt, last) <= 3.0) {
+        return true
+      }
+    }
 
+    val loaded = graph.loadedTiles
+    if (loaded.isEmpty()) {
+      // Overpass-only graph with no tile bounds: allow unless tile-backed without planarization
+      return (graph.source == GraphDataSource.TILES || graph.source == GraphDataSource.MERGED) && !graph.hasBeenPlanarized
+    }
+
+    // 2) Planarization must have run before emitting DEAD_END on tile-backed graphs
+    if (!graph.hasBeenPlanarized) {
+      return true
+    }
+
+    val loadedByKey = loaded.associateBy { "${it.z}_${it.x}_${it.y}" }
+    // Find tile containing endpoint
+    val ownTile =
+      loaded.firstOrNull { b ->
+        pt.lat in (b.south - 0.0001)..(b.north + 0.0001) &&
+          GeoMath.unwrapLonDelta(pt.lon - b.west) >= -0.0001 &&
+          GeoMath.unwrapLonDelta(b.east - pt.lon) >= -0.0001
+      } ?: return true
+
+    // 3) All 8 neighbors around endpoint's tile must be loaded
+    val nTiles = 1 shl ownTile.z
+    var anyNeighborMissing = false
+    for (dy in -1..1) {
+      for (dx in -1..1) {
+        if (dx == 0 && dy == 0) continue
+        val ny = ownTile.y + dy
+        if (ny < 0 || ny >= nTiles) continue
+        val nx = (ownTile.x + dx + nTiles) % nTiles
+        val nKey = "${ownTile.z}_${nx}_${ny}"
+        if (nKey !in loadedByKey) {
+          anyNeighborMissing = true
+          missingTileKeysOut?.add(nKey)
+        }
+      }
+    }
+    if (anyNeighborMissing) return true
+
+    // 4) Endpoint must lie at least 30 m inside the loaded-tile union outer perimeter
+    val interiorThresholdM = 30.0
+    var minLat = Double.MAX_VALUE
+    var maxLat = -Double.MAX_VALUE
+    var minWest = Double.MAX_VALUE
+    var maxEast = -Double.MAX_VALUE
+    for (t in loaded) {
+      if (t.south < minLat) minLat = t.south
+      if (t.north > maxLat) maxLat = t.north
+      if (t.west < minWest) minWest = t.west
+      if (t.east > maxEast) maxEast = t.east
+    }
+    val dUnionWest = GeoMath.haversineMeters(pt, GeoPoint(pt.lat, minWest))
+    val dUnionEast = GeoMath.haversineMeters(pt, GeoPoint(pt.lat, maxEast))
+    val dUnionNorth = GeoMath.haversineMeters(pt, GeoPoint(maxLat, pt.lon))
+    val dUnionSouth = GeoMath.haversineMeters(pt, GeoPoint(minLat, pt.lon))
+    if (minOf(dUnionWest, dUnionEast, dUnionNorth, dUnionSouth) < interiorThresholdM) {
+      return true
+    }
+
+    // Also check individual loaded tile edges within 30m that lack an adjacent loaded tile
     for (tile in loaded) {
-      val latPad = 0.0001
-      val lonPad = 0.0001
-      if (pt.lat < tile.south - latPad || pt.lat > tile.north + latPad ||
-        pt.lon < tile.west - lonPad || pt.lon > tile.east + lonPad
+      if (pt.lat < tile.south - 0.0005 || pt.lat > tile.north + 0.0005 ||
+        pt.lon < tile.west - 0.0005 || pt.lon > tile.east + 0.0005
       ) {
         continue
       }
-
-      val dWest = GeoMath.haversineMeters(pt, GeoPoint(pt.lat, tile.west))
-      val dEast = GeoMath.haversineMeters(pt, GeoPoint(pt.lat, tile.east))
-      val dNorth = GeoMath.haversineMeters(pt, GeoPoint(tile.north, pt.lon))
-      val dSouth = GeoMath.haversineMeters(pt, GeoPoint(tile.south, pt.lon))
-
-      val bordersToCheck = ArrayList<String>(2)
-      if (dWest <= thresholdM) bordersToCheck += "${tile.z}_${tile.x - 1}_${tile.y}"
-      if (dEast <= thresholdM) bordersToCheck += "${tile.z}_${tile.x + 1}_${tile.y}"
-      if (dNorth <= thresholdM) bordersToCheck += "${tile.z}_${tile.x}_${tile.y - 1}"
-      if (dSouth <= thresholdM) bordersToCheck += "${tile.z}_${tile.x}_${tile.y + 1}"
-
-      for (neighborKey in bordersToCheck) {
-        val neighborTile = loadedByKey[neighborKey]
-        if (neighborTile == null) {
-          // Neighbour tile is NOT loaded yet -> treat as unloaded border
-          return true
-        }
-        // Neighbour tile IS loaded: only allow dead end when it has NO endpoint within 2 m
-        val hasEndpointInNeighbor =
-          graph.ways.values.any { w ->
-            if (w.id == currentWayId || w.points.isEmpty()) return@any false
-            val endPts = listOf(w.points.first(), w.points.last())
-            endPts.any { ep ->
-              ep.lat in (neighborTile.south - 0.00003)..(neighborTile.north + 0.00003) &&
-                ep.lon in (neighborTile.west - 0.00003)..(neighborTile.east + 0.00003) &&
-                GeoMath.haversineMeters(pt, ep) <= 2.0
-            }
-          }
-        if (hasEndpointInNeighbor) {
-          return true
-        }
-      }
+      val nInt = 1 shl tile.z
+      val dW = GeoMath.haversineMeters(pt, GeoPoint(pt.lat, tile.west))
+      val dE = GeoMath.haversineMeters(pt, GeoPoint(pt.lat, tile.east))
+      val dN = GeoMath.haversineMeters(pt, GeoPoint(tile.north, pt.lon))
+      val dS = GeoMath.haversineMeters(pt, GeoPoint(tile.south, pt.lon))
+      if (dW <= interiorThresholdM && "${tile.z}_${(tile.x - 1 + nInt) % nInt}_${tile.y}" !in loadedByKey) return true
+      if (dE <= interiorThresholdM && "${tile.z}_${(tile.x + 1) % nInt}_${tile.y}" !in loadedByKey) return true
+      if (dN <= interiorThresholdM && tile.y > 0 && "${tile.z}_${tile.x}_${tile.y - 1}" !in loadedByKey) return true
+      if (dS <= interiorThresholdM && tile.y < nInt - 1 && "${tile.z}_${tile.x}_${tile.y + 1}" !in loadedByKey) return true
     }
     return false
   }
@@ -1921,6 +2070,19 @@ object AheadGraphAnalyzer {
    * mean radius 8-60m, 3+ attached external roads) and cul-de-sac loops (radius < 25m, 1 stem road).
    */
   private fun detectGeometricCycles(graph: RoadGraph): RoundaboutCycleInfo {
+    val cycleCacheKey =
+      CycleCacheKey(
+        fetchedAtMs = graph.fetchedAtMs,
+        wayCount = graph.ways.size,
+        nodeCount = graph.nodes.size,
+        source = graph.source,
+        waysSignatureHash = computeWaysSignatureHash(graph),
+        hasBeenPlanarized = graph.hasBeenPlanarized,
+      )
+    synchronized(compositeCacheLock) {
+      roundaboutCycleCache[cycleCacheKey]?.let { return it }
+    }
+
     val topoEdges = mutableListOf<TopoEdge>()
     val adj = HashMap<Long, MutableList<TopoEdge>>()
     var edgeIdSeq = 0
@@ -1950,49 +2112,90 @@ object AheadGraphAnalyzer {
       }
     }
 
-    if (topoEdges.isEmpty()) return RoundaboutCycleInfo(emptyMap(), emptySet())
+    if (topoEdges.isEmpty()) {
+      val emptyRes = RoundaboutCycleInfo(emptyMap(), emptySet())
+      synchronized(compositeCacheLock) {
+        roundaboutCycleCache[cycleCacheKey] = emptyRes
+      }
+      return emptyRes
+    }
 
     val roundaboutNodeToCycle = HashMap<Long, Int>()
     val culDeSacLoopNodes = HashSet<Long>()
-    val seenCycleSignatures = HashSet<String>()
+    val seenCycleSignatures = HashSet<Long>()
     var cycleSeq = 1
 
+    // Preallocated primitive DFS stack (zero Long/Int boxing during traversal)
+    val stackNodes = LongArray(13)
+    val stackEdges = arrayOfNulls<TopoEdge>(12)
     val sortedNodes = adj.keys.sorted()
+    val mPerDegLat = 111_320.0
+    val maxDfsVisitsPerStart = 256
+    val maxStartRadiusM = 180.0
+    val maxStartRadiusSq = maxStartRadiusM * maxStartRadiusM
+
     for (startNode in sortedNodes) {
       val startNeighbors = adj[startNode] ?: continue
       if (startNeighbors.size < 2) continue
 
-      val pathNodes = ArrayList<Long>(13)
-      val pathEdges = ArrayList<TopoEdge>(12)
-      val pathEdgeIds = HashSet<Int>(16)
-      val visitedNodes = HashSet<Long>(16)
+      val firstEdge = startNeighbors[0]
+      val startPt = if (firstEdge.u == startNode) firstEdge.points.first() else firstEdge.points.last()
+      val mPerDegLon = 111_320.0 * cos(Math.toRadians(startPt.lat)).coerceAtLeast(0.15)
+      stackNodes[0] = startNode
+      var visitsForStart = 0
 
-      pathNodes += startNode
-      visitedNodes += startNode
-
-      fun dfs(curr: Long, accumLen: Double) {
-        if (pathEdges.size >= 12) return
+      fun dfs(curr: Long, depth: Int, accumLen: Double) {
+        if (depth >= 12 || visitsForStart >= maxDfsVisitsPerStart) return
+        visitsForStart++
         val edges = adj[curr] ?: return
-        for (edge in edges) {
-          if (edge.id in pathEdgeIds) continue
+        for (ei in edges.indices) {
+          val edge = edges[ei]
+          var edgeUsed = false
+          for (k in 0 until depth) {
+            if (stackEdges[k]?.id == edge.id) {
+              edgeUsed = true
+              break
+            }
+          }
+          if (edgeUsed) continue
+
           val next = if (edge.u == curr) edge.v else edge.u
           val nextLen = accumLen + edge.lengthMeters
           if (nextLen > 400.0) continue
 
-          if (next == startNode && pathEdges.size in 2..11) {
-            val totalEdges = pathEdges + edge
-            if (totalEdges.size in 3..12 && nextLen in 25.0..400.0) {
-              val sig = totalEdges.map { it.id }.sorted().joinToString(",")
-              if (seenCycleSignatures.add(sig)) {
-                val cycleNodes = pathNodes.toList()
+          if (next == startNode && depth in 2..11) {
+            // Canonical orientation guard: avoid duplicate clockwise/counter-clockwise traversals
+            if (nextLen >= 25.0 && stackNodes[1] <= curr) {
+              // Fast FNV-1a-like order-independent 64-bit signature of sorted edge IDs
+              val edgeIds = IntArray(depth + 1)
+              for (k in 0 until depth) edgeIds[k] = stackEdges[k]!!.id
+              edgeIds[depth] = edge.id
+              edgeIds.sort()
+              var sigHash = -3750763034362895579L
+              for (eid in edgeIds) {
+                sigHash = (sigHash xor eid.toLong()) * 1099511628211L
+              }
+              if (seenCycleSignatures.add(sigHash)) {
+                val cycleNodes = ArrayList<Long>(depth + 1)
+                val totalEdges = ArrayList<TopoEdge>(depth + 1)
+                for (k in 0..depth) cycleNodes += stackNodes[k]
+                for (k in 0 until depth) totalEdges += stackEdges[k]!!
+                totalEdges += edge
                 val ringPts = buildCycleRingPoints(cycleNodes, totalEdges)
                 val geomOk = evaluateCycleGeometry(ringPts)
                 if (geomOk != null) {
-                  val cycleEdgeSet = totalEdges.mapTo(HashSet()) { it.id }
-                  val externalEdges = HashSet<Int>()
+                  val externalEdges = HashSet<Int>(8)
                   for (cn in cycleNodes) {
-                    for (inc in adj[cn].orEmpty()) {
-                      if (inc.id !in cycleEdgeSet) externalEdges += inc.id
+                    val incList = adj[cn] ?: continue
+                    for (inc in incList) {
+                      var inCycle = false
+                      for (ce in totalEdges) {
+                        if (ce.id == inc.id) {
+                          inCycle = true
+                          break
+                        }
+                      }
+                      if (!inCycle) externalEdges += inc.id
                     }
                   }
                   if (geomOk.meanRadius in 8.0..60.0 && externalEdges.size >= 3) {
@@ -2006,24 +2209,40 @@ object AheadGraphAnalyzer {
                 }
               }
             }
-          } else if (next > startNode && next !in visitedNodes && pathEdges.size < 11) {
-            visitedNodes += next
-            pathNodes += next
-            pathEdges += edge
-            pathEdgeIds += edge.id
-            dfs(next, nextLen)
-            pathEdgeIds -= edge.id
-            pathEdges.removeAt(pathEdges.lastIndex)
-            pathNodes.removeAt(pathNodes.lastIndex)
-            visitedNodes -= next
+          } else if (next > startNode && depth < 11) {
+            var alreadyVisited = false
+            for (k in 0..depth) {
+              if (stackNodes[k] == next) {
+                alreadyVisited = true
+                break
+              }
+            }
+            if (alreadyVisited) continue
+
+            val nextPt = if (edge.u == next) edge.points.first() else edge.points.last()
+            val dx = GeoMath.unwrapLonDelta(nextPt.lon - startPt.lon) * mPerDegLon
+            val dy = (nextPt.lat - startPt.lat) * mPerDegLat
+            val distSq = dx * dx + dy * dy
+            if (distSq > maxStartRadiusSq) continue
+            val straightBack = kotlin.math.sqrt(distSq)
+            if (nextLen + straightBack > 405.0) continue
+
+            stackNodes[depth + 1] = next
+            stackEdges[depth] = edge
+            dfs(next, depth + 1, nextLen)
+            stackEdges[depth] = null
           }
         }
       }
 
-      dfs(startNode, 0.0)
+      dfs(startNode, 0, 0.0)
     }
 
-    return RoundaboutCycleInfo(roundaboutNodeToCycle, culDeSacLoopNodes)
+    val result = RoundaboutCycleInfo(roundaboutNodeToCycle, culDeSacLoopNodes)
+    synchronized(compositeCacheLock) {
+      roundaboutCycleCache[cycleCacheKey] = result
+    }
+    return result
   }
 
   private fun buildCycleRingPoints(nodes: List<Long>, edges: List<TopoEdge>): List<GeoPoint> {
@@ -3248,12 +3467,15 @@ object AheadGraphAnalyzer {
 
       val clusterLinkWays = linkWays.filter { it.id in reachableLinkIds }
 
-      // Log nearby *_link within 350m that are NOT reachable from user's path
+      // Log nearby *_link within 350m that are NOT reachable from user's path (distance, layer, direction)
       for (lw in linkWays) {
         if (lw.id in consumedLinkIds || lw.id in reachableLinkIds) continue
         val dToCenter = lw.points.minOf { GeoMath.haversineMeters(centerPt, it) }
         if (dToCenter <= 350.0) {
-          unreachableLinkLogsOut += "way=${lw.id} (${lw.tags.highway}) @${dToCenter.toInt()}m: nearby, not reachable"
+          val lLayer = TileEndpointPlanarizer.effectiveLayer(lw.tags)
+          val lDir = lw.tags.effectiveOneway() ?: "twoway"
+          unreachableLinkLogsOut +=
+            "way=${lw.id} (${lw.tags.highway}) @${dToCenter.toInt()}m layer=$lLayer dir=$lDir: nearby, not reachable"
         }
       }
 

@@ -41,6 +41,25 @@ enum class LandscapePanelSide {
   RIGHT,
 }
 
+enum class LadderOrder {
+  NEAREST_AT_BOTTOM,
+  NEAREST_AT_TOP,
+}
+
+enum class ChaseCameraDistance(val zoomOffset: Double) {
+  CLOSE(0.0),
+  NORMAL(-0.6),
+  FAR(-1.2),
+}
+
+enum class PassByRelation {
+  DIRECT,
+  VIA_FRONTAGE_OR_RAMP,
+  ACROSS_MEDIAN,
+  GRADE_SEPARATED,
+  NOT_CONNECTED,
+}
+
 @Immutable
 data class TestSpot(
   val id: String,
@@ -287,6 +306,15 @@ data class BorderStitchStats(
   val worstUnconnected: List<BorderEndpointInfo> = emptyList(),
 )
 
+@Immutable
+data class PlanarizeStats(
+  val vertexMerges: Int = 0,
+  val segmentSplits: Int = 0,
+  val rejectedLayerMismatches: Int = 0,
+  val unsnappedCorridorEndpoints: Int = 0,
+  val unsnappedSamples: List<String> = emptyList(),
+)
+
 data class RoadGraph(
   val nodes: Map<Long, OsmNode>,
   val ways: Map<Long, OsmWay>,
@@ -296,6 +324,8 @@ data class RoadGraph(
   val source: GraphDataSource = GraphDataSource.OVERPASS,
   val loadedTiles: List<LoadedTileBounds> = emptyList(),
   val borderStitchStats: BorderStitchStats = BorderStitchStats(),
+  val planarizeStats: PlanarizeStats = PlanarizeStats(),
+  val hasBeenPlanarized: Boolean = false,
 )
 
 enum class BranchStatus {
@@ -567,6 +597,10 @@ data class AheadTimelineEntry(
   val isLandmark: Boolean = false,
   val primaryWayId: Long? = null,
   val branchWayIds: List<Long> = emptyList(),
+  val isPassByStreet: Boolean = false,
+  val passBySide: RelativeDirection? = null,
+  val passByRelation: PassByRelation? = null,
+  val passByLateralMeters: Double? = null,
 )
 
 @Immutable
@@ -602,6 +636,9 @@ data class AheadAnalysisResult(
   val tracedPathSegments: List<TracedPathSegment> = emptyList(),
   val horizonStoppedAtUnloadedBorder: Boolean = false,
   val nearbyUnreachableLinks: List<String> = emptyList(),
+  val isPartialBudgetResult: Boolean = false,
+  val isReducedHorizon: Boolean = false,
+  val loadingAheadTileKeys: List<String> = emptyList(),
 )
 
 enum class SearchScope {
@@ -963,6 +1000,13 @@ data class PipelineDiagnostics(
   val idCollisions: Int = 0,
   val danglingNodeRefs: Int = 0,
   val borderStitchStats: BorderStitchStats = BorderStitchStats(),
+  val isReducedHorizon: Boolean = false,
+  val watchdogBlockedCount: Int = 0,
+  val watchdogMaxBlockMs: Long = 0L,
+  val watchdogTopOffenders: List<String> = emptyList(),
+  val repoLockMaxWaitMs: Double = 0.0,
+  val repoLockMaxHoldMs: Double = 0.0,
+  val planarizeStats: PlanarizeStats = PlanarizeStats(),
 )
 
 enum class DebugEdgeCategory {

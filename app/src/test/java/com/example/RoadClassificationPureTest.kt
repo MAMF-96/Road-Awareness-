@@ -27,6 +27,7 @@ class RoadClassificationPureTest {
     ways: List<OsmWay>,
     source: GraphDataSource = GraphDataSource.OVERPASS,
     loadedTiles: List<LoadedTileBounds> = emptyList(),
+    hasBeenPlanarized: Boolean = false,
   ): RoadGraph {
     val nodeMap = nodes.associateBy { it.id }
     val wayMap = ways.associateBy { it.id }
@@ -44,6 +45,7 @@ class RoadClassificationPureTest {
       fromCache = false,
       source = source,
       loadedTiles = loadedTiles,
+      hasBeenPlanarized = hasBeenPlanarized,
     )
   }
 
@@ -147,9 +149,21 @@ class RoadClassificationPureTest {
     val borderFeatures = AheadGraphAnalyzer.analyzeAhead(tileBorderGraph, pMatch, TravelMode.DRIVING, 12.0)
     assertFalse(borderFeatures.any { it.type == FeatureType.DEAD_END })
 
-    // Neighbor tile IS loaded -> true DEAD_END
-    val boundsWithNeighbor = bounds + LoadedTileBounds(14, 1, 0, south = 30.00101, west = 30.9900, north = 30.0200, east = 31.0100)
-    val loadedNeighborGraph = graphFrom(listOf(n1, n2), listOf(w1), GraphDataSource.TILES, boundsWithNeighbor)
+    // 3x3 surrounding tiles loaded + planarized -> true DEAD_END
+    val boundsWithNeighbor =
+      listOf(
+        LoadedTileBounds(14, 1, 1, south = 29.9900, west = 30.9900, north = 30.00101, east = 31.0100),
+        LoadedTileBounds(14, 0, 1, south = 29.9900, west = 30.9700, north = 30.00101, east = 30.9900),
+        LoadedTileBounds(14, 2, 1, south = 29.9900, west = 31.0100, north = 30.00101, east = 31.0300),
+        LoadedTileBounds(14, 0, 0, south = 30.00101, west = 30.9700, north = 30.0200, east = 30.9900),
+        LoadedTileBounds(14, 1, 0, south = 30.00101, west = 30.9900, north = 30.0200, east = 31.0100),
+        LoadedTileBounds(14, 2, 0, south = 30.00101, west = 31.0100, north = 30.0200, east = 31.0300),
+        LoadedTileBounds(14, 0, 2, south = 29.9700, west = 30.9700, north = 29.9900, east = 30.9900),
+        LoadedTileBounds(14, 1, 2, south = 29.9700, west = 30.9900, north = 29.9900, east = 31.0100),
+        LoadedTileBounds(14, 2, 2, south = 29.9700, west = 31.0100, north = 29.9900, east = 31.0300),
+      )
+    val loadedNeighborGraph =
+      graphFrom(listOf(n1, n2), listOf(w1), GraphDataSource.TILES, boundsWithNeighbor, hasBeenPlanarized = true)
     val nMatch = MapMatcher.match(loadedNeighborGraph, GeoPoint(30.0002, 31.0000), 0.0, TravelMode.DRIVING, null).primary!!
     val deadFeatures = AheadGraphAnalyzer.analyzeAhead(loadedNeighborGraph, nMatch, TravelMode.DRIVING, 12.0)
     assertTrue(deadFeatures.any { it.type == FeatureType.DEAD_END })

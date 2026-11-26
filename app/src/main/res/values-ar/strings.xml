@@ -259,4 +259,24 @@
     <string name="entry_unverified">غير متحقق</string>
     <string name="found_match_badge">مُطابق</string>
     <string name="found_target_offscreen_format">تم العثور · %1$s</string>
+
+    <!-- Road Ladder, Chase Camera & Performance Mode -->
+    <string name="ladder_title">سُلّم الطريق</string>
+    <string name="ladder_order_label">ترتيب السُلّم</string>
+    <string name="ladder_nearest_bottom">الأقرب في الأسفل</string>
+    <string name="ladder_nearest_top">الأقرب في الأعلى</string>
+    <string name="ladder_more_rows_format">+%1$d</string>
+    <string name="ladder_you_here">أنت</string>
+    <string name="ladder_continues_loading">الطريق مستمر (جارٍ التحميل)</string>
+    <string name="ladder_ramp_to_format">منحدر إلى %1$s</string>
+    <string name="ladder_unnamed_street">شارع بلا اسم معروف / Unnamed street</string>
+    <string name="ladder_unknown_dest">غير معروف / unknown</string>
+    <string name="settings_chase_camera_title">كاميرا المتابعة (منظور الشخص الثالث)</string>
+    <string name="settings_chase_camera_sub">إمالة أقرب خلف المركبة مع استباق ناعم للمنعطفات</string>
+    <string name="settings_camera_distance">بُعد الكاميرا</string>
+    <string name="camera_dist_close">قريب</string>
+    <string name="camera_dist_normal">عادي</string>
+    <string name="camera_dist_far">بعيد</string>
+    <string name="settings_performance_mode">وضع الأداء</string>
+    <string name="settings_performance_mode_sub">إيقاف المباني ثلاثية الأبعاد لتحسين سلاسة العرض</string>
 </resources>

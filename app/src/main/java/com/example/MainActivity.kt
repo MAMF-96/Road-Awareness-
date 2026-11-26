@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.StrictMode
 import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -21,6 +22,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.DeveloperOrientation
+import com.example.ui.MainThreadWatchdog
 import com.example.ui.RoadAwarenessViewModel
 import com.example.ui.components.TouchTelemetry
 import com.example.ui.components.ensureMapLibreInitialized
@@ -44,6 +46,15 @@ class MainActivity : ComponentActivity() {
 
   @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
   override fun onCreate(savedInstanceState: Bundle?) {
+    if (BuildConfig.DEBUG) {
+      StrictMode.setThreadPolicy(
+        StrictMode.ThreadPolicy.Builder()
+          .detectAll()
+          .penaltyLog()
+          .build(),
+      )
+      MainThreadWatchdog.start()
+    }
     super.onCreate(savedInstanceState)
     val alwaysLightIconsBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
     enableEdgeToEdge(

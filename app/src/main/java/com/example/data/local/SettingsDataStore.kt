@@ -9,7 +9,9 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.BuildConfig
 import com.example.config.AppConfig
+import com.example.data.model.ChaseCameraDistance
 import com.example.data.model.DeveloperOrientation
+import com.example.data.model.LadderOrder
 import com.example.data.model.LandscapePanelSide
 import com.example.data.model.PanelStyle
 import com.example.data.model.TestSpot
@@ -50,6 +52,10 @@ data class UserSettings(
   val showMinorJunctions: Boolean = false,
   val landmarksAheadEnabled: Boolean = true,
   val recentSearches: List<String> = emptyList(),
+  val ladderOrder: LadderOrder = LadderOrder.NEAREST_AT_BOTTOM,
+  val chaseCameraEnabled: Boolean = false,
+  val chaseCameraDistance: ChaseCameraDistance = ChaseCameraDistance.NORMAL,
+  val performanceModeEnabled: Boolean = false,
 )
 
 class SettingsRepository(private val context: Context) {
@@ -79,6 +85,10 @@ class SettingsRepository(private val context: Context) {
   private val keyShowMinorJunctions = booleanPreferencesKey("show_minor_junctions")
   private val keyLandmarksAheadEnabled = booleanPreferencesKey("landmarks_ahead_enabled")
   private val keyRecentSearches = stringPreferencesKey("recent_searches_json")
+  private val keyLadderOrder = stringPreferencesKey("ladder_order")
+  private val keyChaseCameraEnabled = booleanPreferencesKey("chase_camera_enabled")
+  private val keyChaseCameraDistance = stringPreferencesKey("chase_camera_distance")
+  private val keyPerformanceMode = booleanPreferencesKey("performance_mode_enabled")
 
   val settingsFlow: Flow<UserSettings> =
     context.settingsDataStore.data.map { prefs ->
@@ -137,6 +147,14 @@ class SettingsRepository(private val context: Context) {
         showMinorJunctions = prefs[keyShowMinorJunctions] ?: false,
         landmarksAheadEnabled = prefs[keyLandmarksAheadEnabled] ?: true,
         recentSearches = decodeRecentSearches(prefs[keyRecentSearches]),
+        ladderOrder =
+          runCatching { LadderOrder.valueOf(prefs[keyLadderOrder] ?: LadderOrder.NEAREST_AT_BOTTOM.name) }
+            .getOrDefault(LadderOrder.NEAREST_AT_BOTTOM),
+        chaseCameraEnabled = prefs[keyChaseCameraEnabled] ?: false,
+        chaseCameraDistance =
+          runCatching { ChaseCameraDistance.valueOf(prefs[keyChaseCameraDistance] ?: ChaseCameraDistance.NORMAL.name) }
+            .getOrDefault(ChaseCameraDistance.NORMAL),
+        performanceModeEnabled = prefs[keyPerformanceMode] ?: false,
       )
     }
 
@@ -260,6 +278,22 @@ class SettingsRepository(private val context: Context) {
 
   suspend fun setLandmarksAheadEnabled(enabled: Boolean) {
     context.settingsDataStore.edit { it[keyLandmarksAheadEnabled] = enabled }
+  }
+
+  suspend fun setLadderOrder(order: LadderOrder) {
+    context.settingsDataStore.edit { it[keyLadderOrder] = order.name }
+  }
+
+  suspend fun setChaseCameraEnabled(enabled: Boolean) {
+    context.settingsDataStore.edit { it[keyChaseCameraEnabled] = enabled }
+  }
+
+  suspend fun setChaseCameraDistance(distance: ChaseCameraDistance) {
+    context.settingsDataStore.edit { it[keyChaseCameraDistance] = distance.name }
+  }
+
+  suspend fun setPerformanceModeEnabled(enabled: Boolean) {
+    context.settingsDataStore.edit { it[keyPerformanceMode] = enabled }
   }
 
   suspend fun addRecentSearch(query: String) {

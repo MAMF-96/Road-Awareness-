@@ -265,13 +265,30 @@ private fun PortraitAndTabletCardContent(
       )
     }
 
-    // Body: Left (~40%) transparent schematic canvas + Right (~60%) branches / nearest roads / direction picker
+    val offRoadUnresolved =
+      (offRoad.isOffRoad && offRoad.selectedCandidate == null) ||
+        (offRoad.isOffRoad && offRoad.needsDirectionChoice && offRoad.chosenForwardAlongWay == null)
+    val showRoadLadder =
+      !isExpanded &&
+        !offRoadUnresolved &&
+        (uiState.features.isNotEmpty() || uiState.timelineEntries.any { it.isPassByStreet })
+    val compactLadderHeight =
+      (maxPanelHeight - (if (hasFeatureOrOffRoadChips) 168.dp else 132.dp))
+        .coerceIn(if (isTablet) 144.dp else 128.dp, if (isTablet) 186.dp else 164.dp)
+
+    // Body: Left (~40%) transparent schematic canvas + Right (~60%) Road Ladder / candidates / direction picker
     Row(
       modifier =
         Modifier
           .fillMaxWidth()
           .weight(1f, fill = false)
-          .then(if (isExpanded) Modifier else Modifier.height(IntrinsicSize.Min)),
+          .then(
+            when {
+              isExpanded -> Modifier
+              showRoadLadder -> Modifier.height(compactLadderHeight)
+              else -> Modifier.height(IntrinsicSize.Min)
+            },
+          ),
       horizontalArrangement = Arrangement.spacedBy(8.dp),
       verticalAlignment = Alignment.Top,
     ) {
@@ -284,12 +301,10 @@ private fun PortraitAndTabletCardContent(
           Modifier
             .weight(0.40f)
             .then(
-              if (isExpanded) {
-                Modifier.height(if (isTablet) 148.dp else 124.dp)
-              } else {
-                Modifier
-                  .fillMaxHeight()
-                  .heightIn(min = if (isTablet) 136.dp else 104.dp, max = 124.dp)
+              when {
+                isExpanded -> Modifier.height(if (isTablet) 148.dp else 124.dp)
+                showRoadLadder -> Modifier.fillMaxHeight()
+                else -> Modifier.fillMaxHeight().heightIn(min = if (isTablet) 136.dp else 104.dp, max = 124.dp)
               },
             ),
       )
@@ -367,6 +382,23 @@ private fun PortraitAndTabletCardContent(
             }
           }
         }
+      } else if (showRoadLadder) {
+        Box(
+          modifier = Modifier.weight(0.60f).fillMaxHeight(),
+        ) {
+          RoadLadderSection(
+            features = uiState.features,
+            timelineEntries = uiState.timelineEntries,
+            selectedFeatureIndex = uiState.selectedFeatureIndex,
+            ladderOrder = uiState.settings.ladderOrder,
+            unitSystem = uiState.effectiveUnitSystem,
+            horizonStoppedAtUnloadedBorder = uiState.horizonStoppedAtUnloadedBorder,
+            compactMode = true,
+            onSelectFeature = onSelectFeature,
+            onExpandRequest = { onToggleExpand(true) },
+            modifier = Modifier.fillMaxSize(),
+          )
+        }
       } else {
         Column(
           modifier = Modifier.weight(0.60f),
@@ -396,50 +428,8 @@ private fun PortraitAndTabletCardContent(
                 )
               }
             }
-            selectedFeature == null -> {
-              PortraitEmptyOrErrorRow(uiState = uiState, onRetryRoadData = onRetryRoadData)
-            }
-            selectedFeature.branches.isEmpty() -> {
-              NonBranchingDetailRow(feature = selectedFeature, unitSystem = uiState.effectiveUnitSystem)
-            }
             else -> {
-              val compactCap =
-                when {
-                  selectedFeature.isInterchangeGroup() -> 3
-                  !isTablet && (hasFeatureOrOffRoadChips || maxPanelHeight < 260.dp) -> 1
-                  else -> 2
-                }
-              val shownBranches = selectedFeature.branches.take(compactCap)
-              val overflow = (selectedFeature.branches.size - shownBranches.size).coerceAtLeast(0)
-              val simSelectable = BuildConfig.DEBUG && uiState.isMockModeActive
-              shownBranches.forEach { branch ->
-                val isSimSelected = simSelectable && uiState.selectedSimulationBranchWayId == branch.wayId
-                val isFoundBranch = isFoundBranchMatch(branch, uiState.activeFoundRoad)
-                PortraitBranchRow(
-                  branch = branch,
-                  featureIndex = selectedFeature.index,
-                  parentType = selectedFeature.effectiveDisplayType(),
-                  staggerOffsetMeters = selectedFeature.staggerOffsetMeters,
-                  frontageSide = selectedFeature.frontageSide,
-                  unitSystem = uiState.effectiveUnitSystem,
-                  isExpanded = false,
-                  isFoundHighlight = isFoundBranch,
-                  isSelectedForSimulation = isSimSelected,
-                  onClickForSimulation =
-                    if (simSelectable) {
-                      { onSelectSimulationBranch(branch.wayId) }
-                    } else {
-                      null
-                    },
-                )
-              }
-              if (overflow > 0) {
-                MoreBranchesChip(
-                  overflow = overflow,
-                  compact = false,
-                  onClick = { onToggleExpand(true) },
-                )
-              }
+              PortraitEmptyOrErrorRow(uiState = uiState, onRetryRoadData = onRetryRoadData)
             }
           }
         }
@@ -834,49 +824,22 @@ private fun LandscapeSidePanelContent(
                 },
               )
             }
-            selectedFeature == null -> {
-              LandscapeEmptyOrErrorRow(uiState = uiState, onRetryRoadData = onRetryRoadData)
-            }
-            selectedFeature.branches.isEmpty() -> {
-              NonBranchingDetailRow(feature = selectedFeature, unitSystem = uiState.effectiveUnitSystem)
+            uiState.features.isNotEmpty() || uiState.timelineEntries.any { it.isPassByStreet } -> {
+              RoadLadderSection(
+                features = uiState.features,
+                timelineEntries = uiState.timelineEntries,
+                selectedFeatureIndex = uiState.selectedFeatureIndex,
+                ladderOrder = uiState.settings.ladderOrder,
+                unitSystem = uiState.effectiveUnitSystem,
+                horizonStoppedAtUnloadedBorder = uiState.horizonStoppedAtUnloadedBorder,
+                compactMode = compactSpace,
+                onSelectFeature = onSelectFeature,
+                onExpandRequest = { onToggleExpand(true) },
+                modifier = Modifier.fillMaxSize(),
+              )
             }
             else -> {
-              val simSelectable = BuildConfig.DEBUG && uiState.isMockModeActive
-              WholeRowBranchPacker(
-                itemCount = selectedFeature.branches.size,
-                maxFittedItems = if (selectedFeature.isInterchangeGroup() && !isExpanded) 3 else Int.MAX_VALUE,
-                spacingDp = if (compactSpace) 2.dp else 4.dp,
-                modifier = Modifier.fillMaxSize(),
-                itemContent = { idx, forMeasurementOnly ->
-                  val branch = selectedFeature.branches[idx]
-                  val isSimSelected = simSelectable && uiState.selectedSimulationBranchWayId == branch.wayId
-                  val isFoundBranch = isFoundBranchMatch(branch, uiState.activeFoundRoad)
-                  LandscapeSideCompactBranchRow(
-                    branch = branch,
-                    featureIndex = selectedFeature.index,
-                    parentType = selectedFeature.effectiveDisplayType(),
-                    unitSystem = uiState.effectiveUnitSystem,
-                    compact = compactSpace,
-                    attachTestTag = !forMeasurementOnly,
-                    isFoundHighlight = isFoundBranch,
-                    isSelectedForSimulation = isSimSelected,
-                    onClickForSimulation =
-                      if (simSelectable) {
-                        { onSelectSimulationBranch(branch.wayId) }
-                      } else {
-                        null
-                      },
-                  )
-                },
-                overflowChipContent = { overflow, forMeasurementOnly ->
-                  MoreBranchesChip(
-                    overflow = overflow,
-                    compact = compactSpace,
-                    onClick = { onToggleExpand(true) },
-                    attachTestTag = !forMeasurementOnly,
-                  )
-                },
-              )
+              LandscapeEmptyOrErrorRow(uiState = uiState, onRetryRoadData = onRetryRoadData)
             }
           }
         }
