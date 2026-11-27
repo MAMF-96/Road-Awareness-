@@ -46,10 +46,38 @@ enum class LadderOrder {
   NEAREST_AT_TOP,
 }
 
-enum class ChaseCameraDistance(val zoomOffset: Double) {
-  CLOSE(0.0),
-  NORMAL(-0.6),
-  FAR(-1.2),
+enum class LadderTextSize(
+  val primarySp: Int,
+  val secondarySp: Int,
+  val distanceSp: Int,
+) {
+  NORMAL(16, 14, 20),
+  LARGE(18, 16, 22),
+  EXTRA_LARGE(20, 18, 24),
+}
+
+enum class NameOrder {
+  AUTO,
+  ARABIC_FIRST,
+  ENGLISH_FIRST,
+}
+
+enum class QualitySetting {
+  AUTO,
+  HIGH,
+  LOW,
+}
+
+enum class ChaseCameraDistance(
+  val zoomOffset: Double,
+  val tiltDeg: Double,
+  val vehiclePosFraction: Double,
+  val pinMaxMeters: Double,
+) {
+  VERY_CLOSE(zoomOffset = 0.6, tiltDeg = 68.0, vehiclePosFraction = 0.86, pinMaxMeters = 300.0),
+  CLOSE(zoomOffset = 0.0, tiltDeg = 66.0, vehiclePosFraction = 0.84, pinMaxMeters = 300.0),
+  NORMAL(zoomOffset = -0.6, tiltDeg = 62.0, vehiclePosFraction = 0.80, pinMaxMeters = 400.0),
+  FAR(zoomOffset = -1.4, tiltDeg = 60.0, vehiclePosFraction = 0.78, pinMaxMeters = 400.0),
 }
 
 enum class PassByRelation {
@@ -737,6 +765,38 @@ data class OffRoadState(
 )
 
 @Immutable
+data class CandidateFactorDebug(
+  val wayId: Long,
+  val highway: String,
+  val name: String,
+  val distanceMeters: Double,
+  val distScore: Double,
+  val angleScore: Double,
+  val classPrior: Double,
+  val spurFactor: Double,
+  val continuityFactor: Double,
+  val onewayFactor: Double,
+  val finalScore: Double,
+) {
+  fun toReportLine(): String =
+    String.format(
+      Locale.US,
+      "way=%d %s (%s) d=%.1fm -> %.2f [d=%.2f a=%.2f cls=%.2f sp=%.2f cnt=%.2f 1w=%.2f]",
+      wayId,
+      highway,
+      name.take(18),
+      distanceMeters,
+      finalScore,
+      distScore,
+      angleScore,
+      classPrior,
+      spurFactor,
+      continuityFactor,
+      onewayFactor,
+    )
+}
+
+@Immutable
 data class MatchDiagnostics(
   val graphVersionRead: Long = 0L,
   val sourceRead: String = "none",
@@ -753,6 +813,8 @@ data class MatchDiagnostics(
   val droppedByMissingName: Int = 0,
   val droppedByStatus: Int = 0,
   val matchDurationMs: Long = 0L,
+  val topCandidates: List<CandidateFactorDebug> = emptyList(),
+  val hysteresisNote: String? = null,
 ) {
   fun toFilterSummary(): String =
     "drop[r=$droppedByRadius cls=$droppedByClass acc=$droppedByAccess hdg=$droppedByHeading 1w=$droppedByOneway name=$droppedByMissingName st=$droppedByStatus]"
@@ -819,11 +881,21 @@ data class SavedPin(
       ref = null,
     )
 
-  fun mapLabelText(): String {
+  fun mapLabelText(order: NameOrder = NameOrder.AUTO): String {
     val ar = nameAr?.takeIf { it.isNotBlank() }
     val en = nameEn?.takeIf { it.isNotBlank() }
+    val same = ar != null && en != null && ar.equals(en, ignoreCase = true)
     return when {
-      ar != null && en != null && ar != en -> "$ar\n$en"
+      same -> ar!!
+      ar != null && en != null -> {
+        val arabicFirst =
+          when (order) {
+            NameOrder.ARABIC_FIRST -> true
+            NameOrder.ENGLISH_FIRST -> false
+            NameOrder.AUTO -> Locale.getDefault().language.lowercase(Locale.US) == "ar"
+          }
+        if (arabicFirst) "$ar\n$en" else "$en\n$ar"
+      }
       ar != null -> ar
       en != null -> en
       else -> primaryName
@@ -1007,6 +1079,7 @@ data class PipelineDiagnostics(
   val repoLockMaxWaitMs: Double = 0.0,
   val repoLockMaxHoldMs: Double = 0.0,
   val planarizeStats: PlanarizeStats = PlanarizeStats(),
+  val trackerStatsSummary: String = "",
 )
 
 enum class DebugEdgeCategory {

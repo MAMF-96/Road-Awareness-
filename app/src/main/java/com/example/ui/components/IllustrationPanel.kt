@@ -146,10 +146,9 @@ fun IllustrationPanel(
 ) {
   val selectedFeature = uiState.selectedFeature
 
-  val hardMaxCardHeight = (maxScreenHeight * 0.40f - outerVerticalMargin).coerceAtLeast(100.dp)
-  val maxPanelHeight =
-    if (isExpanded) hardMaxCardHeight
-    else minOf((maxScreenHeight * 0.36f).coerceAtLeast(200.dp), hardMaxCardHeight)
+  val compactMaxCardHeight = (maxScreenHeight * 0.42f - outerVerticalMargin).coerceAtLeast(100.dp)
+  val expandedMaxCardHeight = (maxScreenHeight * 0.56f - outerVerticalMargin).coerceAtLeast(compactMaxCardHeight)
+  val maxPanelHeight = if (isExpanded) expandedMaxCardHeight else compactMaxCardHeight
 
   val surfaceModifier =
     if (isLandscape) {
@@ -245,24 +244,26 @@ private fun PortraitAndTabletCardContent(
       modifier = Modifier.fillMaxWidth(),
     )
 
-    // Feature Title (full width, 1-line auto-shrink down to 20sp then wrap max 2 lines)
-    FeatureHeaderTitle(
-      uiState = uiState,
-      selectedFeature = selectedFeature,
-      preferredFontSize = if (isTablet) 30.sp else 28.sp,
-      minFontSize = 20.sp,
-      modifier = Modifier.fillMaxWidth(),
-    )
-
-    // Feature selector chips (1 2 3 4) / off-road controls on their own row under Feature Title
-    if (hasFeatureOrOffRoadChips) {
-      FeatureAndOffRoadChipsRow(
+    if (isExpanded) {
+      // Feature Title (full width, 1-line auto-shrink down to 20sp then wrap max 2 lines)
+      FeatureHeaderTitle(
         uiState = uiState,
         selectedFeature = selectedFeature,
-        onSelectFeature = onSelectFeature,
-        onSelectOffRoadDirection = onSelectOffRoadDirection,
-        onClearOffRoadSelection = onClearOffRoadSelection,
+        preferredFontSize = if (isTablet) 30.sp else 28.sp,
+        minFontSize = 20.sp,
+        modifier = Modifier.fillMaxWidth(),
       )
+
+      // Feature selector chips (1 2 3 4) / off-road controls on their own row under Feature Title
+      if (hasFeatureOrOffRoadChips) {
+        FeatureAndOffRoadChipsRow(
+          uiState = uiState,
+          selectedFeature = selectedFeature,
+          onSelectFeature = onSelectFeature,
+          onSelectOffRoadDirection = onSelectOffRoadDirection,
+          onClearOffRoadSelection = onClearOffRoadSelection,
+        )
+      }
     }
 
     val offRoadUnresolved =
@@ -272,44 +273,25 @@ private fun PortraitAndTabletCardContent(
       !isExpanded &&
         !offRoadUnresolved &&
         (uiState.features.isNotEmpty() || uiState.timelineEntries.any { it.isPassByStreet })
-    val compactLadderHeight =
-      (maxPanelHeight - (if (hasFeatureOrOffRoadChips) 168.dp else 132.dp))
-        .coerceIn(if (isTablet) 144.dp else 128.dp, if (isTablet) 186.dp else 164.dp)
 
-    // Body: Left (~40%) transparent schematic canvas + Right (~60%) Road Ladder / candidates / direction picker
-    Row(
-      modifier =
-        Modifier
-          .fillMaxWidth()
-          .weight(1f, fill = false)
-          .then(
-            when {
-              isExpanded -> Modifier
-              showRoadLadder -> Modifier.height(compactLadderHeight)
-              else -> Modifier.height(IntrinsicSize.Min)
-            },
-          ),
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
-      verticalAlignment = Alignment.Top,
-    ) {
-      RoadSchematicCanvas(
-        feature = selectedFeature,
-        travelMode = uiState.travelMode,
-        offRoadState = offRoad,
-        dividedRoadSideOffsetMeters = uiState.dividedRoadSideOffsetMeters,
-        modifier =
-          Modifier
-            .weight(0.40f)
-            .then(
-              when {
-                isExpanded -> Modifier.height(if (isTablet) 148.dp else 124.dp)
-                showRoadLadder -> Modifier.fillMaxHeight()
-                else -> Modifier.fillMaxHeight().heightIn(min = if (isTablet) 136.dp else 104.dp, max = 124.dp)
-              },
-            ),
-      )
+    if (isExpanded) {
+      // Expanded Body: Left (~40%) schematic canvas + Right (~60%) detailed branches & timeline
+      Row(
+        modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Top,
+      ) {
+        RoadSchematicCanvas(
+          feature = selectedFeature,
+          travelMode = uiState.travelMode,
+          offRoadState = offRoad,
+          dividedRoadSideOffsetMeters = uiState.dividedRoadSideOffsetMeters,
+          modifier =
+            Modifier
+              .weight(0.40f)
+              .height(if (isTablet) 148.dp else 124.dp),
+        )
 
-      if (isExpanded) {
         LazyColumn(
           modifier = Modifier.weight(0.60f),
           verticalArrangement = Arrangement.spacedBy(5.dp),
@@ -382,55 +364,59 @@ private fun PortraitAndTabletCardContent(
             }
           }
         }
-      } else if (showRoadLadder) {
-        Box(
-          modifier = Modifier.weight(0.60f).fillMaxHeight(),
-        ) {
-          RoadLadderSection(
-            features = uiState.features,
-            timelineEntries = uiState.timelineEntries,
-            selectedFeatureIndex = uiState.selectedFeatureIndex,
-            ladderOrder = uiState.settings.ladderOrder,
-            unitSystem = uiState.effectiveUnitSystem,
-            horizonStoppedAtUnloadedBorder = uiState.horizonStoppedAtUnloadedBorder,
-            compactMode = true,
-            onSelectFeature = onSelectFeature,
-            onExpandRequest = { onToggleExpand(true) },
-            modifier = Modifier.fillMaxSize(),
-          )
-        }
-      } else {
-        Column(
-          modifier = Modifier.weight(0.60f),
-          verticalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
-          when {
-            offRoad.isOffRoad && offRoad.selectedCandidate == null -> {
-              if (offRoad.candidates.isEmpty()) {
-                OffRoadEmptyRow(uiState = uiState, onRetryRoadData = onRetryRoadData)
-              } else {
-                offRoad.candidates.take(2).forEachIndexed { idx, cand ->
-                  PortraitOffRoadCandidateRow(
-                    candidate = cand,
-                    colorIndex = idx + 1,
-                    unitSystem = uiState.effectiveUnitSystem,
-                    onClick = { onSelectOffRoadCandidate(cand.candidate.way.id) },
-                  )
-                }
-              }
-            }
-            offRoad.isOffRoad && offRoad.needsDirectionChoice && offRoad.chosenForwardAlongWay == null -> {
-              offRoad.directionGroups.forEachIndexed { idx, group ->
-                DirectionChoiceCardRow(
-                  group = group,
-                  index = idx,
-                  onClick = { onSelectOffRoadDirection(group.forwardAlongWay) },
+      }
+    } else if (showRoadLadder) {
+      // Compact mode: full-width Road Ladder (zero schematic sharing)
+      val compactLadderMaxH = (maxPanelHeight - 96.dp).coerceAtLeast(150.dp)
+      Box(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp, max = compactLadderMaxH),
+      ) {
+        RoadLadderSection(
+          features = uiState.features,
+          timelineEntries = uiState.timelineEntries,
+          selectedFeatureIndex = uiState.selectedFeatureIndex,
+          ladderOrder = uiState.settings.ladderOrder,
+          unitSystem = uiState.effectiveUnitSystem,
+          horizonStoppedAtUnloadedBorder = uiState.horizonStoppedAtUnloadedBorder,
+          compactMode = true,
+          onSelectFeature = onSelectFeature,
+          onExpandRequest = { onToggleExpand(true) },
+          textSize = uiState.settings.ladderTextSize,
+          nameOrder = uiState.settings.nameOrder,
+          modifier = Modifier.fillMaxSize(),
+        )
+      }
+    } else {
+      Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+      ) {
+        when {
+          offRoad.isOffRoad && offRoad.selectedCandidate == null -> {
+            if (offRoad.candidates.isEmpty()) {
+              OffRoadEmptyRow(uiState = uiState, onRetryRoadData = onRetryRoadData)
+            } else {
+              offRoad.candidates.take(2).forEachIndexed { idx, cand ->
+                PortraitOffRoadCandidateRow(
+                  candidate = cand,
+                  colorIndex = idx + 1,
+                  unitSystem = uiState.effectiveUnitSystem,
+                  onClick = { onSelectOffRoadCandidate(cand.candidate.way.id) },
                 )
               }
             }
-            else -> {
-              PortraitEmptyOrErrorRow(uiState = uiState, onRetryRoadData = onRetryRoadData)
+          }
+          offRoad.isOffRoad && offRoad.needsDirectionChoice && offRoad.chosenForwardAlongWay == null -> {
+            offRoad.directionGroups.forEachIndexed { idx, group ->
+              DirectionChoiceCardRow(
+                group = group,
+                index = idx,
+                onClick = { onSelectOffRoadDirection(group.forwardAlongWay) },
+              )
             }
+          }
+          else -> {
+            PortraitEmptyOrErrorRow(uiState = uiState, onRetryRoadData = onRetryRoadData)
           }
         }
       }
@@ -556,7 +542,7 @@ private fun PortraitEmptyOrErrorRow(
         )
       }
     }
-    else -> {
+    uiState.hasConfirmedEmptyAhead -> {
       GlassSurface(
         shape = RoundedCornerShape(14.dp),
         isLighterInner = true,
@@ -569,12 +555,15 @@ private fun PortraitEmptyOrErrorRow(
               R.string.no_features_ahead,
               formatRoadDistance(uiState.lookaheadMeters, uiState.effectiveUnitSystem),
             ),
-          fontSize = 12.sp,
+          fontSize = 13.sp,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
           maxLines = 2,
-          modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+          modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
         )
       }
+    }
+    else -> {
+      PanelRowsSkeleton(count = 2)
     }
   }
 }
@@ -629,61 +618,63 @@ private fun LandscapeSidePanelContent(
         modifier = Modifier.fillMaxWidth(),
       )
 
-      // (b) Feature title + feature selector as dots on ONE row
-      Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-      ) {
-        FeatureHeaderTitle(
-          uiState = uiState,
-          selectedFeature = selectedFeature,
-          preferredFontSize = 18.sp,
-          minFontSize = 13.sp,
-          modifier = Modifier.weight(1f),
-        )
-        FeatureSelectorDots(
-          features = uiState.features,
-          selectedIndex = selectedFeature?.index,
-          onSelectFeature = onSelectFeature,
-        )
-      }
-
-      if (hasOffRoadControls) {
+      if (isExpanded) {
+        // (b) Feature title + feature selector as dots on ONE row
         Row(
           modifier = Modifier.fillMaxWidth(),
           verticalAlignment = Alignment.CenterVertically,
           horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-          if (offRoad.needsDirectionChoice && offRoad.chosenForwardAlongWay != null) {
-            SmallCardActionChip(
-              icon = Icons.Default.SwapHoriz,
-              label = "",
-              onClick = { onSelectOffRoadDirection(!offRoad.chosenForwardAlongWay) },
-              modifier = Modifier.testTag("offroad_flip_direction_button"),
-            )
-          }
-          SmallCardActionChip(
-            icon = Icons.Default.Close,
-            label = stringResource(R.string.action_clear),
-            onClick = onClearOffRoadSelection,
-            modifier = Modifier.testTag("offroad_clear_button"),
+          FeatureHeaderTitle(
+            uiState = uiState,
+            selectedFeature = selectedFeature,
+            preferredFontSize = 18.sp,
+            minFontSize = 13.sp,
+            modifier = Modifier.weight(1f),
+          )
+          FeatureSelectorDots(
+            features = uiState.features,
+            selectedIndex = selectedFeature?.index,
+            onSelectFeature = onSelectFeature,
           )
         }
-      }
 
-      // (c) Schematic: keeps 1:1 aspect ratio, 30-40% of panel height (min 84dp), user at bottom
-      RoadSchematicCanvas(
-        feature = selectedFeature,
-        travelMode = uiState.travelMode,
-        offRoadState = offRoad,
-        dividedRoadSideOffsetMeters = uiState.dividedRoadSideOffsetMeters,
-        modifier =
-          Modifier
-            .align(Alignment.CenterHorizontally)
-            .height(schematicH)
-            .aspectRatio(1f),
-      )
+        if (hasOffRoadControls) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            if (offRoad.needsDirectionChoice && offRoad.chosenForwardAlongWay != null) {
+              SmallCardActionChip(
+                icon = Icons.Default.SwapHoriz,
+                label = "",
+                onClick = { onSelectOffRoadDirection(!offRoad.chosenForwardAlongWay) },
+                modifier = Modifier.testTag("offroad_flip_direction_button"),
+              )
+            }
+            SmallCardActionChip(
+              icon = Icons.Default.Close,
+              label = stringResource(R.string.action_clear),
+              onClick = onClearOffRoadSelection,
+              modifier = Modifier.testTag("offroad_clear_button"),
+            )
+          }
+        }
+
+        // (c) Schematic: keeps 1:1 aspect ratio, 30-40% of panel height (min 84dp), user at bottom
+        RoadSchematicCanvas(
+          feature = selectedFeature,
+          travelMode = uiState.travelMode,
+          offRoadState = offRoad,
+          dividedRoadSideOffsetMeters = uiState.dividedRoadSideOffsetMeters,
+          modifier =
+            Modifier
+              .align(Alignment.CenterHorizontally)
+              .height(schematicH)
+              .aspectRatio(1f),
+        )
+      }
 
       // (d) Branches / status area
       Box(
@@ -835,6 +826,8 @@ private fun LandscapeSidePanelContent(
                 compactMode = compactSpace,
                 onSelectFeature = onSelectFeature,
                 onExpandRequest = { onToggleExpand(true) },
+                textSize = uiState.settings.ladderTextSize,
+                nameOrder = uiState.settings.nameOrder,
                 modifier = Modifier.fillMaxSize(),
               )
             }
@@ -956,12 +949,12 @@ private fun LandscapeEmptyOrErrorRow(
         )
       }
     }
-    else -> {
+    uiState.hasConfirmedEmptyAhead -> {
       GlassSurface(
         shape = RoundedCornerShape(14.dp),
         isLighterInner = true,
         withShadow = false,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().testTag("panel_no_features_notice"),
       ) {
         Text(
           text =
@@ -975,6 +968,9 @@ private fun LandscapeEmptyOrErrorRow(
           modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
         )
       }
+    }
+    else -> {
+      PanelRowsSkeleton(count = 2)
     }
   }
 }
@@ -1969,12 +1965,16 @@ private fun HeaderRoadNameSlot(
   val offRoad = uiState.offRoadState
   val tileHint = uiState.tileFallbackRoad
   val lastConfirmed = uiState.lastConfirmedRoadName
+  val classFallback =
+    unnamedRoadWithClassText(
+      displayRoadCandidate?.way?.tags?.highway ?: tileHint?.roadClass,
+    )
 
   when {
     displayRoadCandidate != null && displayRoadCandidate.name.hasAny -> {
       AutoShrinkBilingualNameStack(
         name = displayRoadCandidate.name,
-        fallbackText = stringResource(R.string.current_road_unknown),
+        fallbackText = classFallback,
         maxArabicFontSize = maxArabicFontSize,
         minArabicFontSize = minArabicFontSize,
         maxEnglishFontSize = maxEnglishFontSize,
@@ -2014,7 +2014,7 @@ private fun HeaderRoadNameSlot(
     tileHint != null && tileHint.name.hasAny -> {
       AutoShrinkBilingualNameStack(
         name = tileHint.name,
-        fallbackText = stringResource(R.string.current_road_unknown),
+        fallbackText = classFallback,
         maxArabicFontSize = maxArabicFontSize,
         minArabicFontSize = minArabicFontSize,
         maxEnglishFontSize = maxEnglishFontSize,
@@ -2027,7 +2027,7 @@ private fun HeaderRoadNameSlot(
       Box(modifier = modifier.alpha(staleAlpha).testTag("header_road_name_slot")) {
         AutoShrinkBilingualNameStack(
           name = lastConfirmed,
-          fallbackText = stringResource(R.string.current_road_unknown),
+          fallbackText = classFallback,
           maxArabicFontSize = maxArabicFontSize,
           minArabicFontSize = minArabicFontSize,
           maxEnglishFontSize = maxEnglishFontSize,
@@ -2038,7 +2038,7 @@ private fun HeaderRoadNameSlot(
     displayRoadCandidate != null || uiState.hasConfirmedGraphData -> {
       AutoShrinkBilingualNameStack(
         name = null,
-        fallbackText = stringResource(R.string.current_road_unknown),
+        fallbackText = classFallback,
         maxArabicFontSize = maxArabicFontSize,
         minArabicFontSize = minArabicFontSize,
         maxEnglishFontSize = maxEnglishFontSize,
@@ -2205,7 +2205,7 @@ private fun PortraitOffRoadCandidateRow(
           Box(modifier = Modifier.weight(1f)) {
             BilingualNameStack(
               name = candidate.candidate.name,
-              fallbackText = stringResource(R.string.unknown_value),
+              fallbackText = unnamedRoadWithClassText(candidate.candidate.way.tags.highway),
               arabicFontSize = 14.sp,
               englishFontSize = 12.sp,
               maxLinesPerScript = 2,
@@ -2533,7 +2533,7 @@ private fun PortraitBranchRow(
           )
         } else if (parentType == FeatureType.MERGE && !isLink) {
           val targetName =
-            branch.name.primaryText ?: branch.name.ref ?: stringResource(R.string.unknown_value)
+            branch.name.primaryText ?: branch.name.ref ?: unnamedRoadWithClassText(branch.osmTags.highway)
           Text(
             text = stringResource(R.string.merge_into_format, isolateRefsForBidi(targetName)),
             fontSize = 11.sp,
@@ -2785,7 +2785,9 @@ fun FloatingStatusChipsStrip(
       (!uiState.isMockModeActive && (uiState.location == null || uiState.isGpsSearching)) ||
       (acc != null && acc > 15f && !uiState.isMockModeActive)
   val isOffline = uiState.debugOffline || uiState.showOfflineChipAfter5s
-  val isSlowData = uiState.showSlowDataChipAfter5s
+  val showSourceChips = BuildConfig.DEBUG && uiState.settings.showDataSourceChips
+  val isSlowData = showSourceChips && uiState.showSlowDataChipAfter5s
+  val isBasicData = showSourceChips && uiState.isUsingBasicTileData
   val isUpdatingStale = uiState.isUpdatingStaleData && !isOffline && !isSlowData
   val isUncertain = uiState.debugUncertain || uiState.matchResult.isUncertain
   val isOffRoad = uiState.offRoadState.isOffRoad
@@ -2796,7 +2798,7 @@ fun FloatingStatusChipsStrip(
       isOffline ||
       (isSlowData && !isOffline) ||
       isUpdatingStale ||
-      (uiState.isUsingBasicTileData && !isOffline) ||
+      (isBasicData && !isOffline) ||
       isUncertain
 
   if (!hasAny) return
@@ -2870,7 +2872,7 @@ fun FloatingStatusChipsStrip(
       )
     }
 
-    if (uiState.isUsingBasicTileData && !isOffline) {
+    if (isBasicData && !isOffline) {
       InlineStatusChip(
         icon = Icons.Default.Info,
         label = stringResource(R.string.status_basic_data),

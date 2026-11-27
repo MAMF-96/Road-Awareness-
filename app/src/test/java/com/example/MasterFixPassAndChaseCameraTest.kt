@@ -692,7 +692,7 @@ class MasterFixPassAndChaseCameraTest {
     assertEquals(16.0, offWalk.tiltDeg, 0.001)
     assertEquals(17.8, offWalk.zoom, 0.001)
 
-    // 2) ON: topRatio=0.56 (~78% free height), 60deg Driving / 50deg Walking, speed-zoom + distance presets
+    // 2) ON: CLOSE preset -> vehicle 84% (topRatio=0.68), 66deg Driving / 55deg Walking, speed-zoom + distance presets
     smoother.reset()
     val onClose30 =
       smoother.update(
@@ -707,10 +707,10 @@ class MasterFixPassAndChaseCameraTest {
         isMatchedToRoad = true,
         corridorWorldPoints = emptyList(),
       )
-    assertEquals(0.56, onClose30.topRatio, 0.001)
-    assertEquals(60.0, onClose30.tiltDeg, 0.001)
-    assertEquals(17.6, onClose30.zoom, 0.01)
-    assertEquals(400.0, onClose30.pinMaxDistanceMeters!!, 0.1)
+    assertEquals(0.68, onClose30.topRatio, 0.001)
+    assertEquals(66.0, onClose30.tiltDeg, 0.001)
+    assertEquals(18.4, onClose30.zoom, 0.01)
+    assertEquals(300.0, onClose30.pinMaxDistanceMeters!!, 0.1)
     assertTrue(onClose30.shouldEmitCameraUpdate)
 
     // Throttle check: +30ms (< 67ms) must NOT emit camera update
@@ -760,8 +760,9 @@ class MasterFixPassAndChaseCameraTest {
         isMatchedToRoad = true,
         corridorWorldPoints = emptyList(),
       )
-    assertEquals(0.56, onNormal100.topRatio, 0.001)
-    assertEquals(16.9 - 0.6, onNormal100.zoom, 0.01)
+    assertEquals(0.60, onNormal100.topRatio, 0.001)
+    assertEquals(62.0, onNormal100.tiltDeg, 0.001)
+    assertEquals(17.9 - 0.6, onNormal100.zoom, 0.01)
 
     val sFarWalk = ChaseCameraSmoother()
     val onWalkFar =
@@ -777,8 +778,8 @@ class MasterFixPassAndChaseCameraTest {
         isMatchedToRoad = true,
         corridorWorldPoints = emptyList(),
       )
-    assertEquals(50.0, onWalkFar.tiltDeg, 0.001)
-    assertEquals(18.3 - 1.2, onWalkFar.zoom, 0.01)
+    assertEquals(55.0, onWalkFar.tiltDeg, 0.001)
+    assertEquals(19.0 - 1.4, onWalkFar.zoom, 0.01)
 
     // 3) Curve look-ahead 40m ahead turning sharply +90deg right -> clamped to +25deg * 0.5 = +12.5deg
     val p0 = userPt

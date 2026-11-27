@@ -49,6 +49,10 @@ class ChaseCameraSmoother {
     corridorWorldPoints: List<GeoPoint>,
     isOverviewMode: Boolean = false,
     forceEmit: Boolean = false,
+    zoomTrim: Double = 0.0,
+    tiltOverrideDeg: Double? = null,
+    vehiclePosFraction: Double? = null,
+    curveLeanPercent: Int = 100,
   ): ChaseCameraPose {
     val cleanHeading = normalizeAngleDeg(gpsHeadingDeg)
 
@@ -89,11 +93,11 @@ class ChaseCameraSmoother {
     val baseZoom =
       if (travelMode == TravelMode.DRIVING) {
         val t = ((speedKmh - 30.0) / 70.0).coerceIn(0.0, 1.0)
-        17.6 - t * 0.7
+        18.4 - t * 0.5
       } else {
-        18.3
+        19.0
       }
-    val targetZoom = baseZoom + distancePreset.zoomOffset
+    val targetZoom = (baseZoom + distancePreset.zoomOffset + zoomTrim).coerceIn(13.0, 21.0)
 
     val dtSec =
       if (switchedMode || lastUpdatedAtMs <= 0L) {
@@ -132,11 +136,12 @@ class ChaseCameraSmoother {
         null
       }
 
+    val leanScale = (curveLeanPercent.coerceIn(0, 100) / 100.0) * 0.5
     val finalBearing =
-      if (aheadBearing != null) {
+      if (aheadBearing != null && leanScale > 0.0) {
         val rawDelta = shortestAngleDeltaDeg(nextHeading, aheadBearing)
         val clampedDelta = rawDelta.coerceIn(-25.0, 25.0)
-        normalizeAngleDeg(nextHeading + 0.5 * clampedDelta)
+        normalizeAngleDeg(nextHeading + leanScale * clampedDelta)
       } else {
         nextHeading
       }
@@ -148,6 +153,35 @@ class ChaseCameraSmoother {
         16.0 + (speedMps / 2.0).coerceIn(0.0, 1.0) * 22.0
       }
 
+    val presetTilt =
+      if (travelMode == TravelMode.DRIVING) {
+        when (distancePreset) {
+          ChaseCameraDistance.VERY_CLOSE -> 68.0
+          ChaseCameraDistance.CLOSE -> 66.0
+          ChaseCameraDistance.NORMAL -> 62.0
+          ChaseCameraDistance.FAR -> 60.0
+        }
+      } else {
+        55.0
+      }
+    val finalTilt = (tiltOverrideDeg ?: presetTilt).coerceIn(40.0, 75.0)
+
+    val presetPosFraction =
+      when (distancePreset) {
+        ChaseCameraDistance.VERY_CLOSE -> 0.86
+        ChaseCameraDistance.CLOSE -> 0.84
+        ChaseCameraDistance.NORMAL -> 0.80
+        ChaseCameraDistance.FAR -> 0.78
+      }
+    val finalPosFraction = (vehiclePosFraction ?: presetPosFraction).coerceIn(0.65, 0.90)
+    val finalTopRatio = (2.0 * finalPosFraction - 1.0).coerceIn(0.30, 0.80)
+
+    val presetPinMaxMeters =
+      when (distancePreset) {
+        ChaseCameraDistance.VERY_CLOSE, ChaseCameraDistance.CLOSE -> 300.0
+        ChaseCameraDistance.NORMAL, ChaseCameraDistance.FAR -> 400.0
+      }
+
     val elapsedSinceEmit = if (lastEmitMs <= 0L) Long.MAX_VALUE else nowMs - lastEmitMs
     val shouldEmit = forceEmit || switchedMode || elapsedSinceEmit >= MIN_EMIT_INTERVAL_MS
     if (shouldEmit) {
@@ -156,19 +190,19 @@ class ChaseCameraSmoother {
     lastChaseEnabled = true
 
     return ChaseCameraPose(
-      topRatio = CHASE_TOP_RATIO,
+      topRatio = finalTopRatio,
       zoom = nextZoom,
-      tiltDeg = if (travelMode == TravelMode.DRIVING) 60.0 else 50.0,
+      tiltDeg = finalTilt,
       bearingDeg = finalBearing,
-      pinMaxDistanceMeters = if (isOverviewMode) null else CHASE_PIN_MAX_DIST_METERS,
+      pinMaxDistanceMeters = if (isOverviewMode) null else presetPinMaxMeters,
       headingConeMeters = coneMeters,
       shouldEmitCameraUpdate = shouldEmit,
     )
   }
 
   companion object {
-    const val CHASE_TOP_RATIO = 0.56 // Places anchor at (0.56 + 1.0)/2 = 78% down free area height
-    const val CHASE_PIN_MAX_DIST_METERS = 400.0
+    const val CHASE_TOP_RATIO = 0.68 // Close default: 84% down free area height
+    const val CHASE_PIN_MAX_DIST_METERS = 300.0
     const val MIN_EMIT_INTERVAL_MS = 67L // <= 15 Hz camera updates
 
     fun normalizeAngleDeg(deg: Double): Double {
@@ -252,11 +286,12 @@ class ChaseCameraSmoother {
       pitchDeg: Double,
       minDp: Double = 28.0,
       maxDp: Double = 90.0,
+      metersPerDpOverride: Double? = null,
     ): Double? {
       if (pitchDeg < 30.0) return null
       val cosLat = cos(Math.toRadians(latDeg)).coerceAtLeast(0.15)
       val cosPitch = cos(Math.toRadians(pitchDeg.coerceIn(0.0, 75.0))).coerceAtLeast(0.20)
-      val metersPerDp = 156_543.03 * cosLat / 2.0.pow(zoom) / cosPitch
+      val metersPerDp = metersPerDpOverride ?: (78_271.517 * cosLat / 2.0.pow(zoom) / cosPitch)
       return max(minDp * metersPerDp, maxDp * metersPerDp)
     }
 

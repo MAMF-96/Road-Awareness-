@@ -90,8 +90,11 @@ import com.example.data.model.DeveloperOrientation
 import com.example.data.model.FeatureCensusEntry
 import com.example.data.model.FoundRoadMatch
 import com.example.data.model.LadderOrder
+import com.example.data.model.LadderTextSize
 import com.example.data.model.LandscapePanelSide
+import com.example.data.model.NameOrder
 import com.example.data.model.PanelStyle
+import com.example.data.model.QualitySetting
 import com.example.data.model.SavedPin
 import com.example.data.model.SearchPlaceResult
 import com.example.data.model.SearchScope
@@ -99,6 +102,7 @@ import com.example.data.model.TestSpot
 import com.example.data.model.ThemePreference
 import com.example.data.model.TravelMode
 import com.example.data.model.UnitPreference
+import com.example.ui.FrameQualityMonitorEffect
 import com.example.ui.InspectorSheetDetent
 import com.example.ui.RoadAwarenessViewModel
 import com.example.ui.RoadHudUiState
@@ -110,12 +114,14 @@ import com.example.ui.components.FloatingStatusChipsStrip
 import com.example.ui.components.FoundRoadCalloutCard
 import com.example.ui.components.GraphInspectorBottomSheet
 import com.example.ui.components.IllustrationPanel
+import com.example.ui.components.LocalNameOrder
 import com.example.ui.components.MapLibreHudView
 import com.example.ui.components.PinCalloutCard
 import com.example.ui.components.PinsBottomSheet
 import com.example.ui.components.SearchBottomSheet
 import com.example.ui.components.SettingsBottomSheet
 import com.example.ui.components.TouchTelemetry
+import com.example.ui.components.TuneCameraSheet
 import com.example.ui.components.formatRoadDistance
 import com.example.ui.components.innerPressScale
 import com.example.ui.components.rememberPressHapticInteractionSource
@@ -156,6 +162,13 @@ fun RoadAwarenessScreen(
       viewModel.onPermissionResult(granted)
     }
 
+  val notifPermissionLauncher =
+    rememberLauncherForActivityResult(
+      contract = ActivityResultContracts.RequestPermission(),
+    ) { _ ->
+      // Background tracking runs gracefully with or without notification grant
+    }
+
   LaunchedEffect(Unit) {
     val fine =
       ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
@@ -175,11 +188,17 @@ fun RoadAwarenessScreen(
     }
   }
 
+  FrameQualityMonitorEffect(
+    enabled = uiState.settings.qualitySetting == QualitySetting.AUTO,
+    onLowQualityChanged = { low -> viewModel.updateAutoLowQuality(low) },
+  )
+
   var mapFoundTargetOffScreen by remember { mutableStateOf(false) }
 
   BackHandler(
     enabled =
-      uiState.isSearchOpen ||
+      uiState.isTuneCameraOpen ||
+        uiState.isSearchOpen ||
         uiState.isPinsSheetOpen ||
         uiState.isSettingsOpen ||
         uiState.isInspectorOpen ||
@@ -188,6 +207,7 @@ fun RoadAwarenessScreen(
         uiState.offRoadState.selectedCandidate != null,
   ) {
     when {
+      uiState.isTuneCameraOpen -> viewModel.openTuneCamera(false)
       uiState.isSearchOpen -> viewModel.openSearch(false)
       uiState.isPinsSheetOpen -> viewModel.openPinsSheet(false)
       uiState.isSettingsOpen -> viewModel.openSettings(false)
@@ -358,7 +378,34 @@ fun RoadAwarenessScreen(
     onSelectLadderOrder = { viewModel.setLadderOrder(it) },
     onToggleChaseCamera = { viewModel.setChaseCameraEnabled(it) },
     onSelectChaseCameraDistance = { viewModel.setChaseCameraDistance(it) },
+    onOpenTuneCamera = { viewModel.openTuneCamera(true) },
+    onCloseTuneCamera = { viewModel.openTuneCamera(false) },
+    onUpdateChaseCameraTuning = { zoomTrim, tiltDeg, posFrac, leanPct ->
+      viewModel.updateChaseCameraTuning(
+        zoomTrim = zoomTrim,
+        tiltOverrideDeg = tiltDeg,
+        vehiclePosFraction = posFrac,
+        curveLeanPercent = leanPct,
+      )
+    },
+    onResetChaseCameraTuning = { viewModel.resetChaseCameraTuning() },
     onTogglePerformanceMode = { viewModel.setPerformanceModeEnabled(it) },
+    onSelectQualitySetting = { viewModel.setQualitySetting(it) },
+    onToggleKeepScreenOn = { viewModel.setKeepScreenOn(it) },
+    onToggleBackgroundTracking = { enabled ->
+      if (enabled && Build.VERSION.SDK_INT >= 33) {
+        val granted =
+          ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+          notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+      }
+      viewModel.setBackgroundTrackingWhileDriving(enabled)
+    },
+    onSelectLadderTextSize = { viewModel.setLadderTextSize(it) },
+    onSelectNameOrder = { viewModel.setNameOrder(it) },
+    onToggleShowDataSourceChips = { viewModel.setShowDataSourceChips(it) },
     onToggleOverview = { viewModel.toggleOverviewMode() },
     onToggleShowGraphEdges = { viewModel.setShowGraphEdges(it) },
     onReportCopied = {
@@ -482,7 +529,17 @@ fun RoadAwarenessScreenContent(
   onSelectLadderOrder: (LadderOrder) -> Unit = {},
   onToggleChaseCamera: (Boolean) -> Unit = {},
   onSelectChaseCameraDistance: (ChaseCameraDistance) -> Unit = {},
+  onOpenTuneCamera: () -> Unit = {},
+  onCloseTuneCamera: () -> Unit = {},
+  onUpdateChaseCameraTuning: (Double?, Double?, Double?, Int?) -> Unit = { _, _, _, _ -> },
+  onResetChaseCameraTuning: () -> Unit = {},
   onTogglePerformanceMode: (Boolean) -> Unit = {},
+  onSelectQualitySetting: (QualitySetting) -> Unit = {},
+  onToggleKeepScreenOn: (Boolean) -> Unit = {},
+  onToggleBackgroundTracking: (Boolean) -> Unit = {},
+  onSelectLadderTextSize: (LadderTextSize) -> Unit = {},
+  onSelectNameOrder: (NameOrder) -> Unit = {},
+  onToggleShowDataSourceChips: (Boolean) -> Unit = {},
   onToggleOverview: () -> Unit = {},
   onToggleShowGraphEdges: (Boolean) -> Unit = {},
   onReportCopied: () -> Unit = {},
@@ -532,15 +589,24 @@ fun RoadAwarenessScreenContent(
   val layoutDir = LocalLayoutDirection.current
   val isDark = LocalRoadColors.current.isDark
   val isMapDark = resolveIsMapDark(uiState.settings.themePreference)
+  val effectiveRealBlur = realGlassBlurActive && !uiState.isEffectiveLowQuality
   val hazeState = remember { HazeState() }
   val glassConfig =
-    remember(isDark, isMapDark, effectiveReduceTransparency, realGlassBlurActive, hazeState) {
+    remember(
+      isDark,
+      isMapDark,
+      effectiveReduceTransparency,
+      effectiveRealBlur,
+      uiState.isEffectiveLowQuality,
+      hazeState,
+    ) {
       GlassRenderConfig(
         isDark = isDark,
         isMapDark = isMapDark,
         reduceTransparency = effectiveReduceTransparency,
-        useRealBlur = realGlassBlurActive,
-        hazeState = if (realGlassBlurActive) hazeState else null,
+        useRealBlur = effectiveRealBlur,
+        lowQuality = uiState.isEffectiveLowQuality,
+        hazeState = if (effectiveRealBlur) hazeState else null,
       )
     }
 
@@ -551,7 +617,10 @@ fun RoadAwarenessScreenContent(
   val safeLeftPx = with(density) { safePadding.calculateLeftPadding(layoutDir).toPx() }
   val safeRightPx = with(density) { safePadding.calculateRightPadding(layoutDir).toPx() }
 
-  CompositionLocalProvider(LocalGlassConfig provides glassConfig) {
+  CompositionLocalProvider(
+    LocalGlassConfig provides glassConfig,
+    LocalNameOrder provides uiState.settings.nameOrder,
+  ) {
     BoxWithConstraints(
       modifier = Modifier.fillMaxSize(),
     ) {
@@ -667,7 +736,7 @@ fun RoadAwarenessScreenContent(
         modifier =
           Modifier
             .fillMaxSize()
-            .let { if (realGlassBlurActive) it.hazeSource(state = hazeState) else it }
+            .let { if (effectiveRealBlur) it.hazeSource(state = hazeState) else it }
             .testTag("map_area_root"),
       ) {
         mapContent(
@@ -1001,6 +1070,23 @@ fun RoadAwarenessScreenContent(
                     )
                   }
 
+                  if (uiState.isTuneCameraOpen) {
+                    val pillClearDp = with(density) { (totalHeightPx - pillTopPx).coerceAtLeast(0f).toDp() }
+                    val tuneBotDp = maxOf(pillClearDp + 8.dp, safeBottomDp + 72.dp)
+                    TuneCameraSheet(
+                      uiState = uiState,
+                      maxScreenHeight = totalHeight,
+                      onUpdateTuning = onUpdateChaseCameraTuning,
+                      onReset = onResetChaseCameraTuning,
+                      onClose = onCloseTuneCamera,
+                      modifier =
+                        Modifier
+                          .align(Alignment.BottomCenter)
+                          .padding(start = 8.dp, end = 8.dp, bottom = tuneBotDp)
+                          .widthIn(max = 560.dp),
+                    )
+                  }
+
                   SnackbarHost(
                     hostState = snackbarHostState,
                     modifier =
@@ -1301,6 +1387,24 @@ fun RoadAwarenessScreenContent(
           )
         }
 
+        if (uiState.isTuneCameraOpen) {
+          val pillHeightFromBottomDp = with(density) { (totalHeightPx - pillTopPx).coerceAtLeast(0f).toDp() }
+          val tuneBottomClearanceDp = maxOf(pillHeightFromBottomDp + 8.dp, safePadding.calculateBottomPadding() + 72.dp)
+          TuneCameraSheet(
+            uiState = uiState,
+            maxScreenHeight = totalHeight,
+            onUpdateTuning = onUpdateChaseCameraTuning,
+            onReset = onResetChaseCameraTuning,
+            onClose = onCloseTuneCamera,
+            modifier =
+              Modifier
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
+                .padding(start = 8.dp, end = 8.dp, bottom = tuneBottomClearanceDp)
+                .widthIn(max = 600.dp),
+          )
+        }
+
         if (uiState.isPinsSheetOpen) {
           PinsBottomSheet(
             pins = uiState.savedPins,
@@ -1340,7 +1444,17 @@ fun RoadAwarenessScreenContent(
           onSelectLadderOrder = onSelectLadderOrder,
           onToggleChaseCamera = onToggleChaseCamera,
           onSelectChaseCameraDistance = onSelectChaseCameraDistance,
+          onOpenTuneCamera = {
+            onOpenSettings(false)
+            onOpenTuneCamera()
+          },
           onTogglePerformanceMode = onTogglePerformanceMode,
+          onSelectQualitySetting = onSelectQualitySetting,
+          onToggleKeepScreenOn = onToggleKeepScreenOn,
+          onToggleBackgroundTracking = onToggleBackgroundTracking,
+          onSelectLadderTextSize = onSelectLadderTextSize,
+          onSelectNameOrder = onSelectNameOrder,
+          onToggleShowDataSourceChips = onToggleShowDataSourceChips,
           onToggleShowGraphEdges = onToggleShowGraphEdges,
           onResetDebugOverrides = onResetDebugOverrides,
           onClearCache = onClearCache,

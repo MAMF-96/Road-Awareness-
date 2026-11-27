@@ -34,6 +34,7 @@ data class GlassRenderConfig(
   val reduceTransparency: Boolean = false,
   val useRealBlur: Boolean = false,
   val hazeState: HazeState? = null,
+  val lowQuality: Boolean = false,
 )
 
 val LocalGlassConfig = compositionLocalOf { GlassRenderConfig() }
@@ -113,15 +114,33 @@ fun GlassSurface(
   val config = LocalGlassConfig.current
   val isDark = config.isDark
   val opaque = config.reduceTransparency
+  val lowQuality = config.lowQuality
 
   val fillBrush =
     when {
-      opaque -> {
+      opaque || lowQuality -> {
         val solid =
-          if (isDark) {
-            if (isLighterInner) GlassTokens.DarkSolidInner else GlassTokens.DarkSolidSurface
+          if (opaque) {
+            if (isDark) {
+              if (isLighterInner) GlassTokens.DarkSolidInner else GlassTokens.DarkSolidSurface
+            } else {
+              if (isLighterInner) GlassTokens.LightSolidInner else GlassTokens.LightSolidSurface
+            }
           } else {
-            if (isLighterInner) GlassTokens.LightSolidInner else GlassTokens.LightSolidSurface
+            // Flat translucent color without gradient allocations when in low quality mode
+            if (isDark) {
+              when {
+                isLighterInner -> GlassTokens.DarkInnerFillTop
+                highOpacity -> GlassTokens.DarkCardFillTop
+                else -> GlassTokens.DarkFillTop
+              }
+            } else {
+              when {
+                isLighterInner -> GlassTokens.LightInnerFillTop
+                highOpacity -> GlassTokens.LightCardFillTop
+                else -> GlassTokens.LightFillTop
+              }
+            }
           }
         Brush.verticalGradient(listOf(solid, solid))
       }
@@ -156,7 +175,7 @@ fun GlassSurface(
 
   val borderBrush =
     when {
-      opaque -> {
+      opaque || lowQuality -> {
         val bColor =
           if (isDark) GlassTokens.DarkSolidBorder
           else if (isLighterInner) GlassTokens.LightInnerBorder
@@ -170,14 +189,14 @@ fun GlassSurface(
 
   val topHighlightColor =
     when {
-      opaque -> Color.Transparent
+      opaque || lowQuality -> Color.Transparent
       isDark -> GlassTokens.DarkTopInnerHighlight
       isLighterInner -> Color.Transparent
       else -> GlassTokens.LightInnerHighlightBorder
     }
 
   val hazeModifier =
-    if (Build.VERSION.SDK_INT >= 31 && !opaque && config.useRealBlur && config.hazeState != null && !isLighterInner) {
+    if (Build.VERSION.SDK_INT >= 31 && !opaque && !lowQuality && config.useRealBlur && config.hazeState != null && !isLighterInner) {
       Modifier.hazeEffect(
         state = config.hazeState,
         style =
@@ -201,7 +220,7 @@ fun GlassSurface(
     }
 
   val shadowMod =
-    if (withShadow) {
+    if (withShadow && !lowQuality) {
       if (isDark) {
         val softShadow =
           if (!config.isMapDark) GlassTokens.DarkOverLightSoftShadowColor else GlassTokens.SoftShadowColor

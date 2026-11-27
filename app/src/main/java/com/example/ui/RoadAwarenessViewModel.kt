@@ -34,11 +34,13 @@ import com.example.data.model.FoundRoadRelation
 import com.example.data.model.GeoPoint
 import com.example.data.model.GraphDataSource
 import com.example.data.model.LadderOrder
+import com.example.data.model.LadderTextSize
 import com.example.data.model.LandmarkAheadItem
 import com.example.data.model.LandscapePanelSide
 import com.example.data.model.LiveMapVectorFeature
 import com.example.data.model.LocationSnapshot
 import com.example.data.model.MatchResult
+import com.example.data.model.NameOrder
 import com.example.data.model.OffRoadState
 import com.example.data.model.OsmTags
 import com.example.data.model.OverpassEndpointTestResult
@@ -48,6 +50,7 @@ import com.example.data.model.PinSortOrder
 import com.example.data.model.PipelineDiagnostics
 import com.example.data.model.PipelineStageLine
 import com.example.data.model.PlanarizeStats
+import com.example.data.model.QualitySetting
 import com.example.data.model.RoadFeature
 import com.example.data.model.RoadGraph
 import com.example.data.model.SavedPin
@@ -68,12 +71,17 @@ import com.example.data.remote.ValhallaRoutingService
 import com.example.data.repository.RoadGraphRepository
 import com.example.domain.AheadGraphAnalyzer
 import com.example.domain.ArabicTtsAnnouncer
+import com.example.domain.FeatureTracker
 import com.example.domain.GeoMath
 import com.example.domain.LocalRoadSearchIndex
 import com.example.domain.MapMatcher
 import com.example.domain.RoadGeometryStepper
 import com.example.domain.TileEndpointPlanarizer
+import com.example.domain.WayMatchHysteresis
 import com.example.location.LocationTracker
+import com.example.location.TrackingForegroundService
+import com.example.location.TrackingServicePolicy
+import com.example.util.CrashDiagnostics
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -134,6 +142,7 @@ data class RoadHudUiState(
   val hiddenMinorCount: Int = 0,
   val landmarksAhead: List<LandmarkAheadItem> = emptyList(),
   val tracedPathSegments: List<TracedPathSegment> = emptyList(),
+  val hasConfirmedEmptyAhead: Boolean = false,
   val horizonStoppedAtUnloadedBorder: Boolean = false,
   val nearbyUnreachableLinks: List<String> = emptyList(),
   val isReducedHorizon: Boolean = false,
@@ -156,7 +165,10 @@ data class RoadHudUiState(
   val isSearchOpen: Boolean = false,
   val isPinsSheetOpen: Boolean = false,
   val isSettingsOpen: Boolean = false,
+  val isTuneCameraOpen: Boolean = false,
   val isInspectorOpen: Boolean = false,
+  val autoLowQualityActive: Boolean = false,
+  val lastExitSummary: String? = null,
   val inspectorDetent: InspectorSheetDetent = InspectorSheetDetent.COLLAPSED,
   val inspectorScrollToSpotsSignal: Int = 0,
   val isMockModeActive: Boolean = BuildConfig.DEBUG,
@@ -230,6 +242,14 @@ data class RoadHudUiState(
         debugBlockTiles ||
         debugSlowNetwork ||
         debugForceOverpassError != null
+
+  val isEffectiveLowQuality: Boolean
+    get() =
+      when (settings.qualitySetting) {
+        QualitySetting.HIGH -> false
+        QualitySetting.LOW -> true
+        QualitySetting.AUTO -> autoLowQualityActive || settings.performanceModeEnabled
+      }
 }
 
 class RoadAwarenessViewModel(application: Application) : AndroidViewModel(application) {
@@ -306,10 +326,26 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
   @Volatile private var lastAheadPrefetchKeys: Set<String> = emptySet()
   @Volatile private var lastAheadPrefetchAtMs: Long = 0L
 
+  private val trackerLock = Any()
+  private val featureTracker = FeatureTracker()
+  private val wayMatchHysteresis = WayMatchHysteresis()
+  @Volatile private var latestTrackerStats: String = "kept=0 add=0 drop=0(none) empty=0/2"
+  @Volatile private var updatingStartedAtMs: Long = 0L
+  @Volatile private var lastActiveMovementAtMs: Long = System.currentTimeMillis()
+
   internal fun currentGraphSnapshot(): RoadGraphRepository.GraphSnapshot =
     roadGraphRepository.currentSnapshot()
 
   init {
+    viewModelScope.launch(Dispatchers.IO) {
+      val summary = CrashDiagnostics.readLastExitSummary(getApplication())
+      _uiState.update { it.copy(lastExitSummary = summary) }
+    }
+    viewModelScope.launch {
+      TrackingForegroundService.stopRequests.collect {
+        setBackgroundTrackingWhileDriving(false)
+      }
+    }
     viewModelScope.launch(pipelineDispatcher) {
       for ((locSnap, force) in locationChannel) {
         onLocationUpdated(locSnap, force)
@@ -495,7 +531,43 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
     _uiState.update { it.copy(hasLocationPermission = granted) }
     if (granted) {
       locationTracker.startTracking()
+      syncTrackingForegroundService()
     }
+  }
+
+  fun onAppResumed() {
+    if (_uiState.value.hasLocationPermission) {
+      locationTracker.startTracking()
+    }
+    syncTrackingForegroundService()
+  }
+
+  private fun syncTrackingForegroundService() {
+    val st = _uiState.value
+    val now = System.currentTimeMillis()
+    val speedMps = st.location?.speedMps ?: 0.0
+    val isActiveMoving = speedMps >= 1.5 || st.isSimulatingDrive
+    val idleStop =
+      TrackingServicePolicy.shouldAutoStopIdle(
+        nowMs = now,
+        idleSinceMs = if (isActiveMoving) null else lastActiveMovementAtMs,
+        isDriving = st.travelMode == TravelMode.DRIVING,
+        isFollowingUser = st.isFollowingUser,
+      )
+    val shouldRun =
+      !idleStop &&
+        TrackingServicePolicy.shouldRunInBackground(
+          hasLocationPermission = st.hasLocationPermission,
+          isMockMode = st.isMockModeActive,
+          backgroundTrackingWhileDriving = st.settings.backgroundTrackingWhileDriving,
+          travelMode = st.travelMode,
+        )
+    TrackingForegroundService.sync(
+      context = getApplication(),
+      shouldRun = shouldRun,
+      isDriving = st.travelMode == TravelMode.DRIVING,
+      isFollowingUser = st.isFollowingUser,
+    )
   }
 
   fun setTravelMode(mode: TravelMode) {
@@ -515,6 +587,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
         lookaheadMeters = newLookahead,
       )
     }
+    syncTrackingForegroundService()
     viewModelScope.launch { settingsRepo.setTravelMode(mode) }
     if (loc != null) {
       val snap = roadGraphRepository.currentSnapshot()
@@ -539,6 +612,10 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
   fun selectOffRoadCandidate(wayId: Long) {
     selectedOffRoadWayId = wayId
     selectedOffRoadForwardOverride = null
+    synchronized(trackerLock) {
+      featureTracker.reset()
+      wayMatchHysteresis.reset()
+    }
     _uiState.update { it.copy(selectedFeatureIndex = 1) }
     val snap = roadGraphRepository.currentSnapshot()
     if (snap.graph.ways.isEmpty()) return
@@ -549,6 +626,9 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
   fun selectOffRoadDirection(forwardAlongWay: Boolean) {
     if (selectedOffRoadWayId == null) return
     selectedOffRoadForwardOverride = forwardAlongWay
+    synchronized(trackerLock) {
+      featureTracker.reset()
+    }
     _uiState.update { it.copy(selectedFeatureIndex = 1) }
     val snap = roadGraphRepository.currentSnapshot()
     if (snap.graph.ways.isEmpty()) return
@@ -559,6 +639,9 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
   fun clearOffRoadSelection() {
     selectedOffRoadWayId = null
     selectedOffRoadForwardOverride = null
+    synchronized(trackerLock) {
+      featureTracker.reset()
+    }
     _uiState.update { it.copy(selectedFeatureIndex = 1) }
     val snap = roadGraphRepository.currentSnapshot()
     if (snap.graph.ways.isEmpty()) return
@@ -581,6 +664,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
   fun onUserPannedMap() {
     if (_uiState.value.isFollowingUser || _uiState.value.isOverviewMode) {
       _uiState.update { it.copy(isFollowingUser = false, isOverviewMode = false) }
+      syncTrackingForegroundService()
     }
   }
 
@@ -592,6 +676,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
         recenterSignal = it.recenterSignal + 1,
       )
     }
+    syncTrackingForegroundService()
   }
 
   fun toggleOverviewMode(enabled: Boolean? = null) {
@@ -604,6 +689,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
         recenterSignal = if (!next) it.recenterSignal + 1 else it.recenterSignal,
       )
     }
+    syncTrackingForegroundService()
   }
 
   fun openSearch(open: Boolean) {
@@ -613,6 +699,17 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
   fun openSettings(open: Boolean) {
     if (open) refreshCacheCount()
     _uiState.update { it.copy(isSettingsOpen = open) }
+  }
+
+  fun openTuneCamera(open: Boolean) {
+    _uiState.update {
+      it.copy(
+        isTuneCameraOpen = open,
+        isSettingsOpen = if (open) false else it.isSettingsOpen,
+        isFollowingUser = if (open) true else it.isFollowingUser,
+        isOverviewMode = if (open) false else it.isOverviewMode,
+      )
+    }
   }
 
   fun setInspectorOpen(open: Boolean, openInHalf: Boolean = false) {
@@ -811,9 +908,21 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
     if (!BuildConfig.DEBUG || !_uiState.value.isMockModeActive) return
     pauseSimulateDrive()
     userTouchedInspectorOrMock = true
+    synchronized(trackerLock) {
+      featureTracker.reset()
+      wayMatchHysteresis.reset()
+    }
+    previousMatchedWayId = null
     lastConfirmedRoadPoint = null
     trailingBreadcrumbs.clear()
-    _uiState.update { it.copy(lastConfirmedRoadName = null, tileFallbackRoad = null, roadNameSource = "none") }
+    _uiState.update {
+      it.copy(
+        lastConfirmedRoadName = null,
+        tileFallbackRoad = null,
+        roadNameSource = "none",
+        hasConfirmedEmptyAhead = false,
+      )
+    }
     val heading = locationTracker.getBaseMockHeadingDeg()
     locationTracker.updateMockLocation(point, heading)
     recordPositionSource("MOCK_TAP")
@@ -1144,6 +1253,11 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
     }
     val pt = GeoPoint(spot.lat, spot.lon)
     val heading = ((spot.headingDeg % 360.0) + 360.0) % 360.0
+    synchronized(trackerLock) {
+      featureTracker.reset()
+      wayMatchHysteresis.reset()
+    }
+    previousMatchedWayId = null
     lastConfirmedRoadPoint = null
     trailingBreadcrumbs.clear()
     locationTracker.updateMockLocation(pt, heading)
@@ -1157,6 +1271,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
         lastConfirmedRoadName = null,
         tileFallbackRoad = null,
         roadNameSource = "none",
+        hasConfirmedEmptyAhead = false,
       )
     }
     val snapshot =
@@ -1228,9 +1343,21 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
     if (!_uiState.value.isMockModeActive) {
       setMockModeEnabled(true)
     }
+    synchronized(trackerLock) {
+      featureTracker.reset()
+      wayMatchHysteresis.reset()
+    }
+    previousMatchedWayId = null
     lastConfirmedRoadPoint = null
     trailingBreadcrumbs.clear()
-    _uiState.update { it.copy(lastConfirmedRoadName = null, tileFallbackRoad = null, roadNameSource = "none") }
+    _uiState.update {
+      it.copy(
+        lastConfirmedRoadName = null,
+        tileFallbackRoad = null,
+        roadNameSource = "none",
+        hasConfirmedEmptyAhead = false,
+      )
+    }
     locationTracker.updateMockLocation(entry.jumpPoint, entry.jumpHeadingDeg)
     recordPositionSource("MOCK_JUMP")
     viewModelScope.launch {
@@ -1310,6 +1437,104 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
     viewModelScope.launch { settingsRepo.setPerformanceModeEnabled(enabled) }
   }
 
+  fun setKeepScreenOn(enabled: Boolean) {
+    _uiState.update { it.copy(settings = it.settings.copy(keepScreenOn = enabled)) }
+    viewModelScope.launch { settingsRepo.setKeepScreenOn(enabled) }
+  }
+
+  fun setBackgroundTrackingWhileDriving(enabled: Boolean) {
+    _uiState.update { it.copy(settings = it.settings.copy(backgroundTrackingWhileDriving = enabled)) }
+    viewModelScope.launch { settingsRepo.setBackgroundTrackingWhileDriving(enabled) }
+    syncTrackingForegroundService()
+  }
+
+  fun setLadderTextSize(size: LadderTextSize) {
+    _uiState.update { it.copy(settings = it.settings.copy(ladderTextSize = size)) }
+    viewModelScope.launch { settingsRepo.setLadderTextSize(size) }
+  }
+
+  fun setNameOrder(order: NameOrder) {
+    _uiState.update { it.copy(settings = it.settings.copy(nameOrder = order)) }
+    viewModelScope.launch { settingsRepo.setNameOrder(order) }
+  }
+
+  fun setShowDataSourceChips(enabled: Boolean) {
+    if (!BuildConfig.DEBUG) return
+    _uiState.update { it.copy(settings = it.settings.copy(showDataSourceChips = enabled)) }
+    viewModelScope.launch { settingsRepo.setShowDataSourceChips(enabled) }
+  }
+
+  fun setQualitySetting(setting: QualitySetting) {
+    _uiState.update { it.copy(settings = it.settings.copy(qualitySetting = setting)) }
+    viewModelScope.launch { settingsRepo.setQualitySetting(setting) }
+  }
+
+  fun updateAutoLowQuality(low: Boolean) {
+    if (_uiState.value.autoLowQualityActive != low) {
+      _uiState.update { it.copy(autoLowQualityActive = low) }
+    }
+  }
+
+  fun updateChaseCameraTuning(
+    zoomTrim: Double? = null,
+    tiltOverrideDeg: Double? = null,
+    vehiclePosFraction: Double? = null,
+    curveLeanPercent: Int? = null,
+    clearTiltOverride: Boolean = false,
+    clearVehiclePos: Boolean = false,
+  ) {
+    val cur = _uiState.value.settings
+    val nextZoomTrim = (zoomTrim ?: cur.chaseZoomTrim).coerceIn(-2.0, 1.0)
+    val nextTilt =
+      when {
+        clearTiltOverride -> null
+        tiltOverrideDeg != null -> tiltOverrideDeg.coerceIn(40.0, 75.0)
+        else -> cur.chaseTiltOverrideDeg
+      }
+    val nextPos =
+      when {
+        clearVehiclePos -> null
+        vehiclePosFraction != null -> vehiclePosFraction.coerceIn(0.65, 0.90)
+        else -> cur.chaseVehiclePosFraction
+      }
+    val nextLean = (curveLeanPercent ?: cur.chaseCurveLeanPercent).coerceIn(0, 100)
+    _uiState.update {
+      it.copy(
+        settings =
+          it.settings.copy(
+            chaseZoomTrim = nextZoomTrim,
+            chaseTiltOverrideDeg = nextTilt,
+            chaseVehiclePosFraction = nextPos,
+            chaseCurveLeanPercent = nextLean,
+          ),
+      )
+    }
+    viewModelScope.launch {
+      settingsRepo.setChaseCameraTuning(
+        zoomTrim = nextZoomTrim,
+        tiltOverrideDeg = nextTilt,
+        vehiclePosFraction = nextPos,
+        curveLeanPercent = nextLean,
+      )
+    }
+  }
+
+  fun resetChaseCameraTuning() {
+    _uiState.update {
+      it.copy(
+        settings =
+          it.settings.copy(
+            chaseCameraDistance = ChaseCameraDistance.CLOSE,
+            chaseZoomTrim = 0.0,
+            chaseTiltOverrideDeg = null,
+            chaseVehiclePosFraction = null,
+            chaseCurveLeanPercent = 100,
+          ),
+      )
+    }
+    viewModelScope.launch { settingsRepo.resetChaseCameraTuning() }
+  }
+
   fun setShowGraphEdges(enabled: Boolean) {
     if (!BuildConfig.DEBUG) return
     _uiState.update { it.copy(settings = it.settings.copy(showGraphEdges = enabled)) }
@@ -1351,6 +1576,11 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
       tileFailedForArea = false
       overpassAutoRetryCount = 0
       overpassAutoRetryCellKey = null
+      updatingStartedAtMs = 0L
+      synchronized(trackerLock) {
+        featureTracker.reset()
+        wayMatchHysteresis.reset()
+      }
       previousMatchedWayId = null
       selectedOffRoadWayId = null
       selectedOffRoadForwardOverride = null
@@ -1363,6 +1593,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
         it.copy(
           isLoadingGraph = true,
           hasConfirmedGraphData = false,
+          hasConfirmedEmptyAhead = false,
           isGraphErrorState = false,
           isDataStaleOver10s = false,
           isUpdatingStaleData = false,
@@ -1375,6 +1606,8 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
           matchResult = MatchResult(null, null, false),
           offRoadState = OffRoadState(),
           features = emptyList(),
+          timelineEntries = emptyList(),
+          landmarksAhead = emptyList(),
           featureCensus = emptyList(),
           debugGraphEdges = emptyList(),
           isDividedRoad = false,
@@ -1405,6 +1638,11 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
       tileFailedForArea = false
       overpassAutoRetryCount = 0
       overpassAutoRetryCellKey = null
+      updatingStartedAtMs = 0L
+      synchronized(trackerLock) {
+        featureTracker.reset()
+        wayMatchHysteresis.reset()
+      }
       previousMatchedWayId = null
       selectedOffRoadWayId = null
       selectedOffRoadForwardOverride = null
@@ -1415,6 +1653,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
       _uiState.update {
         it.copy(
           hasConfirmedGraphData = false,
+          hasConfirmedEmptyAhead = false,
           isUpdatingStaleData = false,
           isUsingBasicTileData = false,
           roadDataFailedStage = null,
@@ -1423,6 +1662,8 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
           matchResult = MatchResult(null, null, false),
           offRoadState = OffRoadState(),
           features = emptyList(),
+          timelineEntries = emptyList(),
+          landmarksAhead = emptyList(),
           featureCensus = emptyList(),
           debugGraphEdges = emptyList(),
           isDividedRoad = false,
@@ -1961,6 +2202,9 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
     val horizonSetting = _uiState.value.settings.horizonDistanceMeters
     val lookahead = AheadGraphAnalyzer.computeLookaheadMeters(mode, snapshot.speedMps, horizonSetting)
     recordTrailingBreadcrumb(snapshot.point)
+    if (snapshot.speedMps >= 1.5 || _uiState.value.isSimulatingDrive || forceFetch) {
+      lastActiveMovementAtMs = System.currentTimeMillis()
+    }
 
     if (!snapshot.isMock) {
       val savedDist = lastSavedLivePoint?.let { GeoMath.haversineMeters(it, snapshot.point) } ?: Double.MAX_VALUE
@@ -1982,14 +2226,23 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
     } else if (primaryNear150) {
       lastFallbackTriggerPoint = null
     }
+    val deadReckoned =
+      synchronized(trackerLock) {
+        featureTracker.deadReckon(snapshot.point, previousMatchedWayId)
+      }
     _uiState.update {
       it.copy(
         location = snapshot,
         lookaheadMeters = lookahead,
         needsMapFallbackWithin150m = !primaryNear150,
         mapFallbackTriggerTick = if (shouldBumpFallback) it.mapFallbackTriggerTick + 1 else it.mapFallbackTriggerTick,
+        features = deadReckoned?.features ?: it.features,
+        timelineEntries =
+          if (deadReckoned != null && deadReckoned.timelineEntries.isNotEmpty()) deadReckoned.timelineEntries
+          else it.timelineEntries,
       )
     }
+    syncTrackingForegroundService()
 
     if (curSnap.graph.ways.isNotEmpty()) {
       runAnalysis(curSnap, snapshot, mode)
@@ -2073,6 +2326,11 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
 
     if (loadingOrFailureStartedMs == 0L) loadingOrFailureStartedMs = now
     if (!isNetworkOnline() && offlineStartedMs == 0L) offlineStartedMs = now
+    if (hadNearbyBefore && (staleWhileValid || forceFetch)) {
+      if (updatingStartedAtMs == 0L) updatingStartedAtMs = now
+    } else {
+      updatingStartedAtMs = 0L
+    }
 
     ensureStatusTimingTicker()
 
@@ -2087,7 +2345,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
         _uiState.update {
           it.copy(
             isLoadingGraph = !hadNearbyBefore,
-            isUpdatingStaleData = staleWhileValid || (hadNearbyBefore && forceFetch),
+            isUpdatingStaleData = false,
             networkError = null,
             roadDataFailedStage = if (hadNearbyBefore) null else it.roadDataFailedStage,
           )
@@ -2137,6 +2395,9 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
               }
               val basicOnly = newSnap.overpassCellCount == 0 && (overpassFailedForArea || _uiState.value.isLoadingGraph)
               val allTilesDone = !update.isPartialOrStale
+              if (allTilesDone) {
+                updatingStartedAtMs = 0L
+              }
               _uiState.update {
                 it.copy(
                   isLoadingGraph = if (allTilesDone && (hasNearby || hadNearbyBefore)) false else it.isLoadingGraph,
@@ -2156,6 +2417,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
             },
             onFailure = { err ->
               tileFailedForArea = true
+              updatingStartedAtMs = 0L
               Log.w("TileGraphData", "Tile road graph unavailable: ${err.message}")
               _uiState.update { it.copy(isUpdatingStaleData = false) }
               refreshPipelineDiagnostics()
@@ -2170,6 +2432,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
         if (!postPrimaryNear150) {
           lastFallbackTriggerPoint = latestPostLoc.point
         }
+        updatingStartedAtMs = 0L
         _uiState.update {
           it.copy(
             isLoadingGraph = if (postNearby || hadNearbyBefore || tileFailedForArea) false else it.isLoadingGraph,
@@ -2212,6 +2475,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
                 val online = isNetworkOnline()
                 if (freshComplete) {
                   loadingOrFailureStartedMs = 0L
+                  updatingStartedAtMs = 0L
                   statusTimingJob?.cancel()
                 }
                 if (online && update.isFromNetwork) {
@@ -2289,7 +2553,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
       viewModelScope.launch {
         while (true) {
           val state = _uiState.value
-          if (!state.isLoadingGraph && !state.isGraphErrorState && !overpassFailedForArea && isNetworkOnline()) {
+          if (!state.isLoadingGraph && !state.isGraphErrorState && !overpassFailedForArea && updatingStartedAtMs == 0L && isNetworkOnline()) {
             offlineStartedMs = 0L
             loadingOrFailureStartedMs = 0L
             _uiState.update {
@@ -2297,6 +2561,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
                 showSlowDataChipAfter5s = false,
                 showOfflineChipAfter5s = false,
                 isDataStaleOver10s = false,
+                isUpdatingStaleData = false,
                 roadDataFailedStage = null,
                 currentActiveOverpassAgeMs = null,
               )
@@ -2323,6 +2588,11 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
           val hasNearbyEdges = curLocPt != null && hasEdgesWithinRadius(snap, curLocPt, 150.0)
           val isEmptyArea = _uiState.value.pipelineDiagnostics.stages.any { it.isEmptyArea }
           val tileActive = tileFetchJob?.isActive == true
+          val fetchStillActive = tileActive || overpassFetchJob?.isActive == true
+          val updatingOver10s =
+            updatingStartedAtMs > 0L &&
+              fetchStillActive &&
+              (now - updatingStartedAtMs) >= 10_000L
           val slowChip = tileActive && !hasNearbyEdges && !isEmptyArea && online && loadOrFailElapsed >= AppConfig.STATUS_CHIP_DELAY_MS
           val offlineChip = (!online && offlineElapsed >= AppConfig.STATUS_CHIP_DELAY_MS) || state.debugOffline
           val skeletonTimedOut = !hasNearbyEdges && !isEmptyArea && loadOrFailElapsed >= AppConfig.SKELETON_TIMEOUT_MS
@@ -2357,6 +2627,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
               showSlowDataChipAfter5s = slowChip,
               showOfflineChipAfter5s = offlineChip,
               isDataStaleOver10s = staleOverThreshold || skeletonTimedOut,
+              isUpdatingStaleData = updatingOver10s,
               isGraphErrorState = if (isEmptyArea) false else (it.isGraphErrorState || skeletonTimedOut),
               roadDataFailedStage = failedStage,
               loadingStallReason = inspectorReason,
@@ -2417,19 +2688,23 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
         val output =
           run {
             val m =
-              MapMatcher.match(
-                graph = graph,
-                position = snapshot.point,
-                headingDeg = snapshot.headingDeg,
-                mode = mode,
-                previousWayId = previousMatchedWayId,
-                accuracyMeters = snapshot.accuracyMeters,
-                speedMps = snapshot.speedMps,
-                spatialIndex = snap.index,
-                graphVersion = snap.version,
-                sourceLabel = snap.sourceLabel,
-              )
+              synchronized(trackerLock) {
+                MapMatcher.match(
+                  graph = graph,
+                  position = snapshot.point,
+                  headingDeg = snapshot.headingDeg,
+                  mode = mode,
+                  previousWayId = previousMatchedWayId,
+                  accuracyMeters = snapshot.accuracyMeters,
+                  speedMps = snapshot.speedMps,
+                  spatialIndex = snap.index,
+                  graphVersion = snap.version,
+                  sourceLabel = snap.sourceLabel,
+                  hysteresis = wayMatchHysteresis,
+                )
+              }
 
+            val nowAnalysisMs = System.currentTimeMillis()
             if (m.primary != null) {
               previousMatchedWayId = m.primary.way.id
               selectedOffRoadWayId = null
@@ -2447,6 +2722,30 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
                   budgetMs = budgetMs,
                   shouldAbort = { !isActive },
                 )
+              val tracedIds =
+                HashSet<Long>(res.tracedPathSegments.size + 1).apply {
+                  add(m.primary.way.id)
+                  res.tracedPathSegments.forEach { add(it.wayId) }
+                }
+              val reconciled =
+                synchronized(trackerLock) {
+                  featureTracker.reconcile(
+                    nowMs = nowAnalysisMs,
+                    matchedWayId = m.primary.way.id,
+                    isOffRoadUnselected = false,
+                    tracedWayIds = tracedIds,
+                    corridorWorldPoints = res.corridorWorldPoints,
+                    userPosition = snapshot.point,
+                    newFeatures = res.features,
+                    newTimelineEntries = res.timelineEntries,
+                    newLandmarks = res.landmarksAhead,
+                    loadedCorridorMeters = res.loadedCorridorMeters,
+                    configuredHorizonMeters = currentSettings.horizonDistanceMeters,
+                    isPartialBudgetResult = res.isPartialBudgetResult,
+                    horizonStoppedAtUnloadedBorder = res.horizonStoppedAtUnloadedBorder,
+                  )
+                }
+              latestTrackerStats = reconciled.statsSummary
               val (unsnappedCount, unsnappedSamples) =
                 if (res.corridorWorldPoints.size >= 2) {
                   TileEndpointPlanarizer.measureUnsnappedNearCorridor(graph, res.corridorWorldPoints, 30.0)
@@ -2472,10 +2771,23 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
                     headingDeg = snapshot.headingDeg,
                     trailingBreadcrumbs = crumbsSnapshot,
                     mode = mode,
-                    timelineEntries = res.timelineEntries,
+                    timelineEntries = reconciled.timelineEntries,
                   )
                 }
-              AnalysisOutput(m, offState, res.features, emptyList(), res.dividedRoad, res, updatedFound, unsnappedCount, unsnappedSamples)
+              AnalysisOutput(
+                match = m,
+                offRoad = offState,
+                features = reconciled.features,
+                census = emptyList(),
+                dividedRoad = res.dividedRoad,
+                detailed = res,
+                refreshedFound = updatedFound,
+                unsnappedCorridorEndpoints = unsnappedCount,
+                unsnappedCorridorSamples = unsnappedSamples,
+                reconciledTimeline = reconciled.timelineEntries,
+                reconciledLandmarks = reconciled.landmarksAhead,
+                hasConfirmedEmptyAhead = reconciled.hasConfirmedEmptyAhead,
+              )
             } else {
               previousMatchedWayId = null
               val accStr = snapshot.accuracyMeters?.let { String.format(Locale.US, "GPS ±%.0fm", it) } ?: "GPS"
@@ -2530,10 +2842,36 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
                       timelineEntries = emptyList(),
                     )
                   }
-                AnalysisOutput(m, offState, resolved.activeFeatures, emptyList(), refreshedFound = updatedFound)
+                AnalysisOutput(
+                  match = m,
+                  offRoad = offState,
+                  features = resolved.activeFeatures,
+                  census = emptyList(),
+                  refreshedFound = updatedFound,
+                  hasConfirmedEmptyAhead = resolved.activeFeatures.isEmpty(),
+                )
               } else {
                 selectedOffRoadWayId = null
                 selectedOffRoadForwardOverride = null
+                val offReconciled =
+                  synchronized(trackerLock) {
+                    featureTracker.reconcile(
+                      nowMs = nowAnalysisMs,
+                      matchedWayId = null,
+                      isOffRoadUnselected = true,
+                      tracedWayIds = emptySet(),
+                      corridorWorldPoints = emptyList(),
+                      userPosition = snapshot.point,
+                      newFeatures = emptyList(),
+                      newTimelineEntries = emptyList(),
+                      newLandmarks = emptyList(),
+                      loadedCorridorMeters = 0.0,
+                      configuredHorizonMeters = currentSettings.horizonDistanceMeters,
+                      isPartialBudgetResult = false,
+                      horizonStoppedAtUnloadedBorder = false,
+                    )
+                  }
+                latestTrackerStats = offReconciled.statsSummary
                 val offState =
                   OffRoadState(
                     isOffRoad = true,
@@ -2556,7 +2894,14 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
                       timelineEntries = emptyList(),
                     )
                   }
-                AnalysisOutput(m, offState, emptyList(), emptyList(), refreshedFound = updatedFound)
+                AnalysisOutput(
+                  match = m,
+                  offRoad = offState,
+                  features = offReconciled.features,
+                  census = emptyList(),
+                  refreshedFound = updatedFound,
+                  hasConfirmedEmptyAhead = offReconciled.hasConfirmedEmptyAhead,
+                )
               }
             }
           }
@@ -2603,16 +2948,19 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
               confirmedName != null -> "cached"
               else -> "none"
             }
+          val preservedCorridor =
+            detailed?.corridorWorldPoints?.takeIf { it.size >= 2 } ?: state.corridorWorldPoints
           state.copy(
             matchResult = match,
             offRoadState = offRoad,
             features = features,
-            timelineEntries = detailed?.timelineEntries ?: emptyList(),
-            corridorWorldPoints = detailed?.corridorWorldPoints ?: emptyList(),
+            timelineEntries = output.reconciledTimeline ?: detailed?.timelineEntries ?: emptyList(),
+            corridorWorldPoints = preservedCorridor,
             loadedCorridorMeters = detailed?.loadedCorridorMeters ?: 0.0,
             hiddenMinorCount = detailed?.hiddenMinorCount ?: 0,
-            landmarksAhead = detailed?.landmarksAhead ?: emptyList(),
+            landmarksAhead = output.reconciledLandmarks ?: detailed?.landmarksAhead ?: emptyList(),
             tracedPathSegments = detailed?.tracedPathSegments ?: emptyList(),
+            hasConfirmedEmptyAhead = output.hasConfirmedEmptyAhead,
             horizonStoppedAtUnloadedBorder = detailed?.horizonStoppedAtUnloadedBorder ?: false,
             nearbyUnreachableLinks = detailed?.nearbyUnreachableLinks ?: emptyList(),
             isReducedHorizon = detailed?.isReducedHorizon ?: (snap.graph.ways.size > 8_000),
@@ -3001,6 +3349,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
             repoLockMaxWaitMs = watchdog.repoLockMaxWaitMs,
             repoLockMaxHoldMs = watchdog.repoLockMaxHoldMs,
             planarizeStats = pStats,
+            trackerStatsSummary = latestTrackerStats,
           ),
       )
     }
@@ -3016,6 +3365,9 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
     val refreshedFound: FoundRoadMatch? = null,
     val unsnappedCorridorEndpoints: Int = 0,
     val unsnappedCorridorSamples: List<String> = emptyList(),
+    val reconciledTimeline: List<AheadTimelineEntry>? = null,
+    val reconciledLandmarks: List<LandmarkAheadItem>? = null,
+    val hasConfirmedEmptyAhead: Boolean = false,
   )
 
   private fun arabicFeatureAnnouncement(feature: RoadFeature): String {
@@ -3069,7 +3421,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
     tileFetchJob?.cancel()
     overpassFetchJob?.cancel()
     overpassDataSource.cancelAllActiveRequests()
-    locationTracker.stopTracking()
+    locationTracker.shutdown()
     ttsAnnouncer.shutdown()
   }
 }

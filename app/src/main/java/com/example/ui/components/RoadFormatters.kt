@@ -10,6 +10,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,11 +32,15 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.data.model.BilingualName
 import com.example.data.model.FeatureType
+import com.example.data.model.NameOrder
 import com.example.data.model.UnitSystem
 import com.example.domain.GeoMath
 import com.example.ui.theme.NotoArabicFontFamily
 import com.example.ui.theme.RobotoFontFamily
+import java.util.Locale
 import kotlin.math.floor
+
+val LocalNameOrder = compositionLocalOf { NameOrder.AUTO }
 
 /**
  * Wraps alphanumeric route refs like "M12" with Unicode LRI/PDI isolates so they stay readable
@@ -117,10 +122,8 @@ fun AutoShrinkSingleLineText(
 
 /**
  * Full-width header bilingual stack:
- * - Arabic (22sp bold -> auto-shrinks down to 16sp, then wraps max 2 lines)
- * - English under it (16sp -> auto-shrinks down to 13sp, then wraps max 2 lines)
- * - Only one language exists -> shows one line/script
- * - Neither exists -> shows [fallbackText] ("غير معروف / unknown" or "—")
+ * - Ordered per [NameOrder] (AUTO / ARABIC_FIRST / ENGLISH_FIRST)
+ * - Case-insensitive duplicate collapse when Arabic & English are identical
  */
 private fun fontFamilyForText(text: String): FontFamily =
   if (BilingualName.containsArabic(text)) NotoArabicFontFamily else FontFamily.SansSerif
@@ -128,30 +131,62 @@ private fun fontFamilyForText(text: String): FontFamily =
 private fun layoutDirectionForText(text: String): LayoutDirection =
   if (GeoMath.isRtlScript(text)) LayoutDirection.Rtl else LayoutDirection.Ltr
 
-private fun resolveDisplayLines(name: BilingualName?): Pair<String?, String?> {
+fun resolveDisplayLines(
+  name: BilingualName?,
+  nameOrder: NameOrder = NameOrder.AUTO,
+): Pair<String?, String?> {
   if (name == null) return null to null
-  val refSuffix = name.ref?.takeIf { it.isNotBlank() }?.let { " \u2066$it\u2069" }.orEmpty()
-  val localPrimary = name.localPrimary?.takeIf { it.isNotBlank() }
-  if (localPrimary != null) {
-    val first =
-      if (BilingualName.containsArabic(localPrimary)) {
-        isolateRefsForBidi(localPrimary) + if (name.ref != null && !localPrimary.contains(name.ref)) refSuffix else ""
-      } else {
-        localPrimary + if (name.ref != null && !localPrimary.contains(name.ref)) " ${name.ref}" else ""
-      }
-    val sec = name.secondaryText?.takeIf { it.isNotBlank() && it != localPrimary }
-    return first to sec
+  val ref = name.ref?.takeIf { it.isNotBlank() }
+  val refSuffix = ref?.let { " \u2066$it\u2069" }.orEmpty()
+
+  fun decorateLine(raw: String): String {
+    val trimmed = raw.trim()
+    val hasRef = ref != null && trimmed.contains(ref, ignoreCase = true)
+    return if (BilingualName.containsArabic(trimmed)) {
+      isolateRefsForBidi(trimmed) + if (!hasRef) refSuffix else ""
+    } else {
+      trimmed + if (ref != null && !hasRef) " $ref" else ""
+    }
   }
 
-  val arLine =
-    name.arabic?.takeIf { it.isNotBlank() }?.let {
-      isolateRefsForBidi(it) + if (!it.contains(name.ref ?: "\u0000")) refSuffix else ""
-    }
+  val arLine = name.arabic?.takeIf { it.isNotBlank() }?.let(::decorateLine)
   val enLine =
-    name.english?.takeIf { it.isNotBlank() }?.let {
-      it + if (name.ref != null && !it.contains(name.ref)) " ${name.ref}" else ""
-    } ?: if (arLine == null) name.ref?.takeIf { it.isNotBlank() } else null
-  return arLine to enLine
+    name.english?.takeIf { it.isNotBlank() }?.let(::decorateLine)
+      ?: if (arLine == null) ref else null
+
+  val dedupedSecond = { first: String?, second: String? ->
+    if (first != null && second != null && first.trim().equals(second.trim(), ignoreCase = true)) {
+      null
+    } else {
+      second
+    }
+  }
+
+  return when (nameOrder) {
+    NameOrder.ARABIC_FIRST -> {
+      val first = arLine ?: enLine
+      val second = if (arLine != null) dedupedSecond(first, enLine) else null
+      first to second
+    }
+    NameOrder.ENGLISH_FIRST -> {
+      val first = enLine ?: arLine
+      val second = if (enLine != null) dedupedSecond(first, arLine) else null
+      first to second
+    }
+    NameOrder.AUTO -> {
+      val localPrimary = name.localPrimary?.takeIf { it.isNotBlank() }
+      if (localPrimary != null) {
+        val first = decorateLine(localPrimary)
+        val rawSec = name.secondaryText?.takeIf { it.isNotBlank() && !it.trim().equals(localPrimary.trim(), ignoreCase = true) }
+        val sec = rawSec?.let(::decorateLine)
+        first to dedupedSecond(first, sec)
+      } else {
+        val first = arLine ?: enLine
+        val second = if (arLine != null) dedupedSecond(first, enLine) else null
+        first to second
+      }
+    }
+  }
 }
 
 @Composable
@@ -168,8 +203,9 @@ fun AutoShrinkBilingualNameStack(
   primaryColor: Color = MaterialTheme.colorScheme.onSurface,
   secondaryColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
   maxLinesPerScript: Int = 2,
+  nameOrder: NameOrder = LocalNameOrder.current,
 ) {
-  val (primaryLine, secondaryLine) = resolveDisplayLines(name)
+  val (primaryLine, secondaryLine) = resolveDisplayLines(name, nameOrder)
 
   Column(modifier = modifier.fillMaxWidth()) {
     if (primaryLine == null && secondaryLine == null) {
@@ -231,8 +267,9 @@ fun BilingualNameStack(
   secondaryColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
   centerAlign: Boolean = false,
   maxLinesPerScript: Int = 2,
+  nameOrder: NameOrder = LocalNameOrder.current,
 ) {
-  val (primaryLine, secondaryLine) = resolveDisplayLines(name)
+  val (primaryLine, secondaryLine) = resolveDisplayLines(name, nameOrder)
 
   Column(modifier = modifier) {
     if (primaryLine == null && secondaryLine == null) {
@@ -300,8 +337,9 @@ fun InlineBilingualRoadName(
   modifier: Modifier = Modifier,
   arabicFontSize: TextUnit = 20.sp,
   englishFontSize: TextUnit = 14.sp,
+  nameOrder: NameOrder = LocalNameOrder.current,
 ) {
-  val (primaryLine, secondaryLine) = resolveDisplayLines(name)
+  val (primaryLine, secondaryLine) = resolveDisplayLines(name, nameOrder)
 
   FlowRow(
     modifier = modifier,
@@ -395,6 +433,27 @@ fun featureTypeTitle(type: FeatureType): String =
     FeatureType.DIAMOND -> stringResource(R.string.feature_diamond)
     FeatureType.TRUMPET -> stringResource(R.string.feature_trumpet)
   }
+
+@Composable
+fun unnamedRoadWithClassText(highway: String?): String {
+  val hw = highway?.trim()?.lowercase(Locale.US)
+  if (hw.isNullOrEmpty()) return stringResource(R.string.current_road_unknown)
+  val classRes =
+    when {
+      hw == "motorway" -> R.string.road_class_motorway
+      hw == "trunk" -> R.string.road_class_trunk
+      hw == "primary" -> R.string.road_class_primary
+      hw == "secondary" -> R.string.road_class_secondary
+      hw == "tertiary" -> R.string.road_class_tertiary
+      hw == "residential" || hw == "living_street" || hw == "unclassified" -> R.string.road_class_residential
+      hw == "service" || hw == "track" -> R.string.road_class_service
+      hw.endsWith("_link") -> R.string.road_class_link
+      hw == "footway" || hw == "path" || hw == "pedestrian" || hw == "steps" || hw == "cycleway" -> R.string.road_class_footway
+      else -> R.string.road_class_road
+    }
+  val className = stringResource(classRes)
+  return stringResource(R.string.unnamed_road_with_class_format, className)
+}
 
 @Composable
 fun formatRoadDistance(meters: Double): String {

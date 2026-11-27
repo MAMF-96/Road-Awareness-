@@ -12,8 +12,11 @@ import com.example.config.AppConfig
 import com.example.data.model.ChaseCameraDistance
 import com.example.data.model.DeveloperOrientation
 import com.example.data.model.LadderOrder
+import com.example.data.model.LadderTextSize
 import com.example.data.model.LandscapePanelSide
+import com.example.data.model.NameOrder
 import com.example.data.model.PanelStyle
+import com.example.data.model.QualitySetting
 import com.example.data.model.TestSpot
 import com.example.data.model.ThemePreference
 import com.example.data.model.TravelMode
@@ -54,8 +57,18 @@ data class UserSettings(
   val recentSearches: List<String> = emptyList(),
   val ladderOrder: LadderOrder = LadderOrder.NEAREST_AT_BOTTOM,
   val chaseCameraEnabled: Boolean = false,
-  val chaseCameraDistance: ChaseCameraDistance = ChaseCameraDistance.NORMAL,
+  val chaseCameraDistance: ChaseCameraDistance = ChaseCameraDistance.CLOSE,
   val performanceModeEnabled: Boolean = false,
+  val keepScreenOn: Boolean = true,
+  val backgroundTrackingWhileDriving: Boolean = true,
+  val ladderTextSize: LadderTextSize = LadderTextSize.LARGE,
+  val nameOrder: NameOrder = NameOrder.AUTO,
+  val showDataSourceChips: Boolean = false,
+  val qualitySetting: QualitySetting = QualitySetting.AUTO,
+  val chaseZoomTrim: Double = 0.0,
+  val chaseTiltOverrideDeg: Double? = null,
+  val chaseVehiclePosFraction: Double? = null,
+  val chaseCurveLeanPercent: Int = 100,
 )
 
 class SettingsRepository(private val context: Context) {
@@ -89,6 +102,16 @@ class SettingsRepository(private val context: Context) {
   private val keyChaseCameraEnabled = booleanPreferencesKey("chase_camera_enabled")
   private val keyChaseCameraDistance = stringPreferencesKey("chase_camera_distance")
   private val keyPerformanceMode = booleanPreferencesKey("performance_mode_enabled")
+  private val keyKeepScreenOn = booleanPreferencesKey("keep_screen_on")
+  private val keyBackgroundTrackingWhileDriving = booleanPreferencesKey("background_tracking_while_driving")
+  private val keyLadderTextSize = stringPreferencesKey("ladder_text_size")
+  private val keyNameOrder = stringPreferencesKey("name_order")
+  private val keyShowDataSourceChips = booleanPreferencesKey("show_data_source_chips")
+  private val keyQualitySetting = stringPreferencesKey("quality_setting")
+  private val keyChaseZoomTrim = doublePreferencesKey("chase_zoom_trim")
+  private val keyChaseTiltOverride = doublePreferencesKey("chase_tilt_override_deg")
+  private val keyChaseVehiclePosFraction = doublePreferencesKey("chase_vehicle_pos_fraction")
+  private val keyChaseCurveLeanPercent = androidx.datastore.preferences.core.intPreferencesKey("chase_curve_lean_percent")
 
   val settingsFlow: Flow<UserSettings> =
     context.settingsDataStore.data.map { prefs ->
@@ -118,6 +141,8 @@ class SettingsRepository(private val context: Context) {
         prefs[keyLandscapePanelSide]?.let { raw ->
           runCatching { LandscapePanelSide.valueOf(raw) }.getOrNull()
         }
+      val rawTiltOverride = prefs[keyChaseTiltOverride]?.takeIf { !it.isNaN() && it >= 40.0 && it <= 75.0 }
+      val rawVehiclePos = prefs[keyChaseVehiclePosFraction]?.takeIf { !it.isNaN() && it in 0.65..0.90 }
       UserSettings(
         themePreference = theme,
         panelStyle = panelStyle,
@@ -152,9 +177,25 @@ class SettingsRepository(private val context: Context) {
             .getOrDefault(LadderOrder.NEAREST_AT_BOTTOM),
         chaseCameraEnabled = prefs[keyChaseCameraEnabled] ?: false,
         chaseCameraDistance =
-          runCatching { ChaseCameraDistance.valueOf(prefs[keyChaseCameraDistance] ?: ChaseCameraDistance.NORMAL.name) }
-            .getOrDefault(ChaseCameraDistance.NORMAL),
+          runCatching { ChaseCameraDistance.valueOf(prefs[keyChaseCameraDistance] ?: ChaseCameraDistance.CLOSE.name) }
+            .getOrDefault(ChaseCameraDistance.CLOSE),
         performanceModeEnabled = prefs[keyPerformanceMode] ?: false,
+        keepScreenOn = prefs[keyKeepScreenOn] ?: true,
+        backgroundTrackingWhileDriving = prefs[keyBackgroundTrackingWhileDriving] ?: true,
+        ladderTextSize =
+          runCatching { LadderTextSize.valueOf(prefs[keyLadderTextSize] ?: LadderTextSize.LARGE.name) }
+            .getOrDefault(LadderTextSize.LARGE),
+        nameOrder =
+          runCatching { NameOrder.valueOf(prefs[keyNameOrder] ?: NameOrder.AUTO.name) }
+            .getOrDefault(NameOrder.AUTO),
+        showDataSourceChips = if (BuildConfig.DEBUG) (prefs[keyShowDataSourceChips] ?: false) else false,
+        qualitySetting =
+          runCatching { QualitySetting.valueOf(prefs[keyQualitySetting] ?: QualitySetting.AUTO.name) }
+            .getOrDefault(QualitySetting.AUTO),
+        chaseZoomTrim = (prefs[keyChaseZoomTrim] ?: 0.0).coerceIn(-2.0, 1.0),
+        chaseTiltOverrideDeg = rawTiltOverride,
+        chaseVehiclePosFraction = rawVehiclePos,
+        chaseCurveLeanPercent = (prefs[keyChaseCurveLeanPercent] ?: 100).coerceIn(0, 100),
       )
     }
 
@@ -294,6 +335,56 @@ class SettingsRepository(private val context: Context) {
 
   suspend fun setPerformanceModeEnabled(enabled: Boolean) {
     context.settingsDataStore.edit { it[keyPerformanceMode] = enabled }
+  }
+
+  suspend fun setKeepScreenOn(enabled: Boolean) {
+    context.settingsDataStore.edit { it[keyKeepScreenOn] = enabled }
+  }
+
+  suspend fun setBackgroundTrackingWhileDriving(enabled: Boolean) {
+    context.settingsDataStore.edit { it[keyBackgroundTrackingWhileDriving] = enabled }
+  }
+
+  suspend fun setLadderTextSize(size: LadderTextSize) {
+    context.settingsDataStore.edit { it[keyLadderTextSize] = size.name }
+  }
+
+  suspend fun setNameOrder(order: NameOrder) {
+    context.settingsDataStore.edit { it[keyNameOrder] = order.name }
+  }
+
+  suspend fun setShowDataSourceChips(enabled: Boolean) {
+    context.settingsDataStore.edit { it[keyShowDataSourceChips] = enabled }
+  }
+
+  suspend fun setQualitySetting(quality: QualitySetting) {
+    context.settingsDataStore.edit { it[keyQualitySetting] = quality.name }
+  }
+
+  suspend fun setChaseCameraTuning(
+    zoomTrim: Double,
+    tiltOverrideDeg: Double?,
+    vehiclePosFraction: Double?,
+    curveLeanPercent: Int,
+  ) {
+    context.settingsDataStore.edit { prefs ->
+      prefs[keyChaseZoomTrim] = zoomTrim.coerceIn(-2.0, 1.0)
+      if (tiltOverrideDeg == null) prefs.remove(keyChaseTiltOverride)
+      else prefs[keyChaseTiltOverride] = tiltOverrideDeg.coerceIn(40.0, 75.0)
+      if (vehiclePosFraction == null) prefs.remove(keyChaseVehiclePosFraction)
+      else prefs[keyChaseVehiclePosFraction] = vehiclePosFraction.coerceIn(0.65, 0.90)
+      prefs[keyChaseCurveLeanPercent] = curveLeanPercent.coerceIn(0, 100)
+    }
+  }
+
+  suspend fun resetChaseCameraTuning() {
+    context.settingsDataStore.edit { prefs ->
+      prefs[keyChaseCameraDistance] = ChaseCameraDistance.CLOSE.name
+      prefs[keyChaseZoomTrim] = 0.0
+      prefs.remove(keyChaseTiltOverride)
+      prefs.remove(keyChaseVehiclePosFraction)
+      prefs[keyChaseCurveLeanPercent] = 100
+    }
   }
 
   suspend fun addRecentSearch(query: String) {

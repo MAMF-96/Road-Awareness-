@@ -20,15 +20,18 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
@@ -50,6 +53,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
@@ -115,8 +119,11 @@ import com.example.data.model.DeveloperOrientation
 import com.example.data.model.FeatureCensusEntry
 import com.example.data.model.FeatureType
 import com.example.data.model.LadderOrder
+import com.example.data.model.LadderTextSize
 import com.example.data.model.LandscapePanelSide
+import com.example.data.model.NameOrder
 import com.example.data.model.PanelStyle
+import com.example.data.model.QualitySetting
 import com.example.data.model.RelativeDirection
 import com.example.data.model.TestSpot
 import com.example.data.model.ThemePreference
@@ -154,7 +161,14 @@ fun SettingsBottomSheet(
   onSelectLadderOrder: (LadderOrder) -> Unit = {},
   onToggleChaseCamera: (Boolean) -> Unit = {},
   onSelectChaseCameraDistance: (ChaseCameraDistance) -> Unit = {},
+  onOpenTuneCamera: () -> Unit = {},
   onTogglePerformanceMode: (Boolean) -> Unit = {},
+  onSelectQualitySetting: (QualitySetting) -> Unit = {},
+  onToggleKeepScreenOn: (Boolean) -> Unit = {},
+  onToggleBackgroundTracking: (Boolean) -> Unit = {},
+  onSelectLadderTextSize: (LadderTextSize) -> Unit = {},
+  onSelectNameOrder: (NameOrder) -> Unit = {},
+  onToggleShowDataSourceChips: (Boolean) -> Unit = {},
   onToggleShowGraphEdges: (Boolean) -> Unit = {},
   onResetDebugOverrides: () -> Unit,
   onClearCache: () -> Unit,
@@ -274,30 +288,94 @@ fun SettingsBottomSheet(
             if (uiState.settings.chaseCameraEnabled) MaterialTheme.colorScheme.onSurface
             else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
         )
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            ThemeOptionChip(
+              label = stringResource(R.string.camera_dist_very_close),
+              selected = uiState.settings.chaseCameraDistance == ChaseCameraDistance.VERY_CLOSE,
+              enabled = uiState.settings.chaseCameraEnabled,
+              onClick = { onSelectChaseCameraDistance(ChaseCameraDistance.VERY_CLOSE) },
+              modifier = Modifier.weight(1f).testTag("chase_dist_very_close"),
+            )
+            ThemeOptionChip(
+              label = stringResource(R.string.camera_dist_close),
+              selected = uiState.settings.chaseCameraDistance == ChaseCameraDistance.CLOSE,
+              enabled = uiState.settings.chaseCameraEnabled,
+              onClick = { onSelectChaseCameraDistance(ChaseCameraDistance.CLOSE) },
+              modifier = Modifier.weight(1f).testTag("chase_dist_close"),
+            )
+          }
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            ThemeOptionChip(
+              label = stringResource(R.string.camera_dist_normal),
+              selected = uiState.settings.chaseCameraDistance == ChaseCameraDistance.NORMAL,
+              enabled = uiState.settings.chaseCameraEnabled,
+              onClick = { onSelectChaseCameraDistance(ChaseCameraDistance.NORMAL) },
+              modifier = Modifier.weight(1f).testTag("chase_dist_normal"),
+            )
+            ThemeOptionChip(
+              label = stringResource(R.string.camera_dist_far),
+              selected = uiState.settings.chaseCameraDistance == ChaseCameraDistance.FAR,
+              enabled = uiState.settings.chaseCameraEnabled,
+              onClick = { onSelectChaseCameraDistance(ChaseCameraDistance.FAR) },
+              modifier = Modifier.weight(1f).testTag("chase_dist_far"),
+            )
+          }
+        }
+
+        val tuneInteraction = rememberPressHapticInteractionSource()
+        OutlinedButton(
+          onClick = {
+            TouchTelemetry.recordControlHandled("tune_camera_button")
+            onOpenTuneCamera()
+          },
+          enabled = uiState.settings.chaseCameraEnabled,
+          interactionSource = tuneInteraction,
+          modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("tune_camera_button"),
+        ) {
+          Row(
+            modifier = Modifier.innerPressScale(tuneInteraction),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(18.dp))
+            Text(text = stringResource(R.string.action_tune_camera))
+          }
+        }
+
+        Text(
+          text = stringResource(R.string.settings_quality_label),
+          fontSize = 14.sp,
+          fontWeight = FontWeight.Medium,
+          color = MaterialTheme.colorScheme.onSurface,
+        )
         Row(
           modifier = Modifier.fillMaxWidth(),
           horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
           ThemeOptionChip(
-            label = stringResource(R.string.camera_dist_close),
-            selected = uiState.settings.chaseCameraDistance == ChaseCameraDistance.CLOSE,
-            enabled = uiState.settings.chaseCameraEnabled,
-            onClick = { onSelectChaseCameraDistance(ChaseCameraDistance.CLOSE) },
-            modifier = Modifier.weight(1f).testTag("chase_dist_close"),
+            label = stringResource(R.string.quality_auto),
+            selected = uiState.settings.qualitySetting == QualitySetting.AUTO,
+            onClick = { onSelectQualitySetting(QualitySetting.AUTO) },
+            modifier = Modifier.weight(1f).testTag("quality_auto_chip"),
           )
           ThemeOptionChip(
-            label = stringResource(R.string.camera_dist_normal),
-            selected = uiState.settings.chaseCameraDistance == ChaseCameraDistance.NORMAL,
-            enabled = uiState.settings.chaseCameraEnabled,
-            onClick = { onSelectChaseCameraDistance(ChaseCameraDistance.NORMAL) },
-            modifier = Modifier.weight(1f).testTag("chase_dist_normal"),
+            label = stringResource(R.string.quality_high),
+            selected = uiState.settings.qualitySetting == QualitySetting.HIGH,
+            onClick = { onSelectQualitySetting(QualitySetting.HIGH) },
+            modifier = Modifier.weight(1f).testTag("quality_high_chip"),
           )
           ThemeOptionChip(
-            label = stringResource(R.string.camera_dist_far),
-            selected = uiState.settings.chaseCameraDistance == ChaseCameraDistance.FAR,
-            enabled = uiState.settings.chaseCameraEnabled,
-            onClick = { onSelectChaseCameraDistance(ChaseCameraDistance.FAR) },
-            modifier = Modifier.weight(1f).testTag("chase_dist_far"),
+            label = stringResource(R.string.quality_low),
+            selected = uiState.settings.qualitySetting == QualitySetting.LOW,
+            onClick = { onSelectQualitySetting(QualitySetting.LOW) },
+            modifier = Modifier.weight(1f).testTag("quality_low_chip"),
           )
         }
 
@@ -307,6 +385,22 @@ fun SettingsBottomSheet(
           checked = uiState.settings.performanceModeEnabled,
           onCheckedChange = onTogglePerformanceMode,
           switchTestTag = "performance_mode_switch",
+        )
+
+        SettingsSwitchRow(
+          title = stringResource(R.string.settings_keep_screen_on),
+          subtitle = stringResource(R.string.settings_keep_screen_on_sub),
+          checked = uiState.settings.keepScreenOn,
+          onCheckedChange = onToggleKeepScreenOn,
+          switchTestTag = "keep_screen_on_switch",
+        )
+
+        SettingsSwitchRow(
+          title = stringResource(R.string.settings_background_tracking),
+          subtitle = stringResource(R.string.settings_background_tracking_sub),
+          checked = uiState.settings.backgroundTrackingWhileDriving,
+          onCheckedChange = onToggleBackgroundTracking,
+          switchTestTag = "background_tracking_switch",
         )
       }
 
@@ -445,6 +539,66 @@ fun SettingsBottomSheet(
             modifier = Modifier.weight(1f).testTag("ladder_order_top"),
           )
         }
+
+        Text(
+          text = stringResource(R.string.settings_ladder_text_size),
+          fontSize = 14.sp,
+          fontWeight = FontWeight.Medium,
+          color = MaterialTheme.colorScheme.onSurface,
+        )
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          ThemeOptionChip(
+            label = stringResource(R.string.text_size_normal),
+            selected = uiState.settings.ladderTextSize == LadderTextSize.NORMAL,
+            onClick = { onSelectLadderTextSize(LadderTextSize.NORMAL) },
+            modifier = Modifier.weight(1f).testTag("ladder_text_normal"),
+          )
+          ThemeOptionChip(
+            label = stringResource(R.string.text_size_large),
+            selected = uiState.settings.ladderTextSize == LadderTextSize.LARGE,
+            onClick = { onSelectLadderTextSize(LadderTextSize.LARGE) },
+            modifier = Modifier.weight(1f).testTag("ladder_text_large"),
+          )
+          ThemeOptionChip(
+            label = stringResource(R.string.text_size_extra_large),
+            selected = uiState.settings.ladderTextSize == LadderTextSize.EXTRA_LARGE,
+            onClick = { onSelectLadderTextSize(LadderTextSize.EXTRA_LARGE) },
+            modifier = Modifier.weight(1f).testTag("ladder_text_xl"),
+          )
+        }
+
+        Text(
+          text = stringResource(R.string.settings_name_order),
+          fontSize = 14.sp,
+          fontWeight = FontWeight.Medium,
+          color = MaterialTheme.colorScheme.onSurface,
+        )
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          ThemeOptionChip(
+            label = stringResource(R.string.name_order_auto),
+            selected = uiState.settings.nameOrder == NameOrder.AUTO,
+            onClick = { onSelectNameOrder(NameOrder.AUTO) },
+            modifier = Modifier.weight(1f).testTag("name_order_auto"),
+          )
+          ThemeOptionChip(
+            label = stringResource(R.string.name_order_ar_first),
+            selected = uiState.settings.nameOrder == NameOrder.ARABIC_FIRST,
+            onClick = { onSelectNameOrder(NameOrder.ARABIC_FIRST) },
+            modifier = Modifier.weight(1f).testTag("name_order_ar"),
+          )
+          ThemeOptionChip(
+            label = stringResource(R.string.name_order_en_first),
+            selected = uiState.settings.nameOrder == NameOrder.ENGLISH_FIRST,
+            onClick = { onSelectNameOrder(NameOrder.ENGLISH_FIRST) },
+            modifier = Modifier.weight(1f).testTag("name_order_en"),
+          )
+        }
       }
 
       HorizontalDivider(color = roadColors.divider)
@@ -525,6 +679,14 @@ fun SettingsBottomSheet(
             checked = uiState.settings.showGraphEdges,
             onCheckedChange = onToggleShowGraphEdges,
             switchTestTag = "inspector_show_graph_edges",
+          )
+
+          SettingsSwitchRow(
+            title = stringResource(R.string.settings_show_data_source_chips),
+            subtitle = null,
+            checked = uiState.settings.showDataSourceChips,
+            onCheckedChange = onToggleShowDataSourceChips,
+            switchTestTag = "show_data_source_chips_switch",
           )
 
           Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1457,11 +1619,13 @@ fun GraphInspectorBottomSheet(
               modifier = Modifier.testTag("inspector_diagnostic_reason"),
             )
 
-            // Name source
+            // Name source & Quality
             val tileInfo =
               uiState.tileFallbackRoad?.let { " | tileClass=${it.roadClass ?: "?"}" } ?: ""
+            val qualityModeStr =
+              "${if (uiState.isEffectiveLowQuality) "low" else "high"} (${uiState.settings.qualitySetting.name.lowercase(Locale.US)})"
             Text(
-              text = "Name source: ${uiState.roadNameSource}$tileInfo | stale10s=${uiState.isDataStaleOver10s}",
+              text = "Name source: ${uiState.roadNameSource}$tileInfo | stale10s=${uiState.isDataStaleOver10s} | Quality: $qualityModeStr",
               fontFamily = FontFamily.Monospace,
               fontSize = 11.sp,
               color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1484,6 +1648,104 @@ fun GraphInspectorBottomSheet(
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.testTag("inspector_divided_road"),
               )
+            }
+
+            // Top-3 match candidates & hysteresis notes (Part 2)
+            val matchDiag = uiState.matchResult.diagnostics
+            if (matchDiag.topCandidates.isNotEmpty() || matchDiag.hysteresisNote != null) {
+              GlassSurface(
+                shape = RoundedCornerShape(12.dp),
+                isLighterInner = true,
+                withShadow = false,
+                modifier = Modifier.fillMaxWidth().testTag("inspector_match_candidates_section"),
+              ) {
+                Column(
+                  modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                  verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                  Text(
+                    text = "Match candidates (top ${matchDiag.topCandidates.size}):",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                  )
+                  matchDiag.hysteresisNote?.let { note ->
+                    Text(
+                      text = "Hysteresis: $note",
+                      fontFamily = FontFamily.Monospace,
+                      fontSize = 10.sp,
+                      fontWeight = FontWeight.SemiBold,
+                      color = roadColors.unverifiedText,
+                      modifier = Modifier.testTag("inspector_match_hysteresis_note"),
+                    )
+                  }
+                  matchDiag.topCandidates.take(3).forEachIndexed { idx, cand ->
+                    Text(
+                      text = "#${idx + 1} ${cand.toReportLine()}",
+                      fontFamily = FontFamily.Monospace,
+                      fontSize = 9.sp,
+                      lineHeight = 12.sp,
+                      color = if (idx == 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                  }
+                }
+              }
+            }
+
+            // Last exit / crash diagnostics (Part 6)
+            GlassSurface(
+              shape = RoundedCornerShape(12.dp),
+              isLighterInner = true,
+              withShadow = false,
+              modifier = Modifier.fillMaxWidth().testTag("inspector_last_exit_section"),
+            ) {
+              Column(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+              ) {
+                Row(
+                  modifier = Modifier.fillMaxWidth(),
+                  verticalAlignment = Alignment.CenterVertically,
+                  horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                  Text(
+                    text = stringResource(R.string.inspector_last_exit),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                  )
+                  val copyLastExitInteraction = rememberPressHapticInteractionSource()
+                  TextButton(
+                    onClick = {
+                      TouchTelemetry.recordControlHandled("inspector_copy_last_exit_button")
+                      val text = uiState.lastExitSummary ?: "none"
+                      clipboardManager.setText(AnnotatedString(text))
+                      onReportCopied()
+                    },
+                    enabled = uiState.lastExitSummary != null,
+                    interactionSource = copyLastExitInteraction,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 36.dp).testTag("inspector_copy_last_exit_button"),
+                  ) {
+                    Text(
+                      text = stringResource(R.string.inspector_copy_report),
+                      fontSize = 11.sp,
+                      modifier = Modifier.innerPressScale(copyLastExitInteraction),
+                    )
+                  }
+                }
+                Text(
+                  text = uiState.lastExitSummary ?: stringResource(R.string.inspector_last_exit_none),
+                  fontFamily = FontFamily.Monospace,
+                  fontSize = 9.sp,
+                  lineHeight = 12.sp,
+                  color =
+                    if (uiState.lastExitSummary != null) roadColors.unverifiedText
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                  maxLines = 6,
+                  overflow = TextOverflow.Ellipsis,
+                )
+              }
             }
 
             if (uiState.pipelineDiagnostics.stages.isNotEmpty()) {
@@ -1519,6 +1781,15 @@ fun GraphInspectorBottomSheet(
                       fontSize = 10.sp,
                       color = MaterialTheme.colorScheme.onSurfaceVariant,
                       modifier = Modifier.testTag("inspector_horizon_stats"),
+                    )
+                  }
+                  if (uiState.pipelineDiagnostics.trackerStatsSummary.isNotBlank()) {
+                    Text(
+                      text = "Tracker: ${uiState.pipelineDiagnostics.trackerStatsSummary}",
+                      fontFamily = FontFamily.Monospace,
+                      fontSize = 10.sp,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant,
+                      modifier = Modifier.testTag("inspector_tracker_stats"),
                     )
                   }
                   if (uiState.pipelineDiagnostics.isInconsistentMatch && uiState.pipelineDiagnostics.inconsistentBannerText != null) {
@@ -3312,16 +3583,27 @@ internal fun buildInspectorPlainText(uiState: RoadHudUiState): String {
   if (uiState.isDividedRoad) {
     lines += "Divided road sep=${uiState.dividedRoadSeparationMeters?.roundToInt() ?: 0}m rule=${uiState.dividedRoadRuleId}"
   }
+  val mDiag = uiState.matchResult.diagnostics
+  mDiag.hysteresisNote?.let { lines += "hysteresis=${it.take(84)}" }
+  mDiag.topCandidates.take(3).forEachIndexed { idx, cand ->
+    lines += "cand#${idx + 1}: ${cand.toReportLine().take(96)}"
+  }
 
   // [SOURCES]
   lines += "[SOURCES]"
-  lines += "name=${uiState.roadNameSource} tileClass=${uiState.tileFallbackRoad?.roadClass ?: "none"} stale10s=${uiState.isDataStaleOver10s}"
+  lines += "name=${uiState.roadNameSource} tileClass=${uiState.tileFallbackRoad?.roadClass ?: "none"} stale10s=${uiState.isDataStaleOver10s} quality=${if (uiState.isEffectiveLowQuality) "low" else "high"}"
   lines += formatCacheStatsText(uiState)
-  if (uiState.pipelineDiagnostics.rollingWindowSummary.isNotBlank() && lines.size < 22) {
+  if (uiState.pipelineDiagnostics.rollingWindowSummary.isNotBlank() && lines.size < 24) {
     lines += "window: ${uiState.pipelineDiagnostics.rollingWindowSummary}"
   }
   if (uiState.pipelineDiagnostics.horizonStatsSummary.isNotBlank()) {
     lines += "horizon: ${uiState.pipelineDiagnostics.horizonStatsSummary}"
+  }
+  if (uiState.pipelineDiagnostics.trackerStatsSummary.isNotBlank()) {
+    lines += "tracker: ${uiState.pipelineDiagnostics.trackerStatsSummary}"
+  }
+  uiState.lastExitSummary?.let { exitSummary ->
+    lines += "lastExit: ${exitSummary.replace('\n', ' ').take(100)}"
   }
   val pStats = uiState.pipelineDiagnostics.planarizeStats
   lines +=
@@ -3430,3 +3712,199 @@ internal fun buildInspectorPlainText(uiState: RoadHudUiState): String {
 
   return lines.take(60).joinToString("\n")
 }
+
+@Composable
+fun TuneCameraSheet(
+  uiState: RoadHudUiState,
+  maxScreenHeight: Dp,
+  onUpdateTuning: (
+    zoomTrim: Double?,
+    tiltOverrideDeg: Double?,
+    vehiclePosFraction: Double?,
+    curveLeanPercent: Int?,
+  ) -> Unit,
+  onReset: () -> Unit,
+  onClose: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val roadColors = LocalRoadColors.current
+  val settings = uiState.settings
+  val maxSheetHeight = (maxScreenHeight * 0.45f).coerceAtLeast(180.dp)
+  val defaultTilt =
+    when (settings.chaseCameraDistance) {
+      ChaseCameraDistance.VERY_CLOSE -> 68.0
+      ChaseCameraDistance.CLOSE -> 66.0
+      ChaseCameraDistance.NORMAL -> 62.0
+      ChaseCameraDistance.FAR -> 60.0
+    }
+  val defaultPosPct =
+    when (settings.chaseCameraDistance) {
+      ChaseCameraDistance.VERY_CLOSE -> 86f
+      ChaseCameraDistance.CLOSE -> 84f
+      ChaseCameraDistance.NORMAL -> 80f
+      ChaseCameraDistance.FAR -> 78f
+    }
+
+  val curTilt = (settings.chaseTiltOverrideDeg ?: defaultTilt).toFloat().coerceIn(40f, 75f)
+  val curPosPct = ((settings.chaseVehiclePosFraction ?: (defaultPosPct / 100.0)) * 100.0).toFloat().coerceIn(65f, 90f)
+  val curZoomTrim = settings.chaseZoomTrim.toFloat().coerceIn(-2.0f, 1.0f)
+  val curLean = settings.chaseCurveLeanPercent.toFloat().coerceIn(0f, 100f)
+
+  GlassSurface(
+    shape = RoundedCornerShape(24.dp),
+    highOpacity = true,
+    modifier =
+      modifier
+        .fillMaxWidth()
+        .heightIn(max = maxSheetHeight)
+        .testTag("tune_camera_sheet"),
+  ) {
+    Column(
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .padding(horizontal = 14.dp, vertical = 8.dp),
+      verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+      ) {
+        Text(
+          text = stringResource(R.string.tune_camera_title),
+          fontSize = 15.sp,
+          fontWeight = FontWeight.Bold,
+          color = MaterialTheme.colorScheme.onSurface,
+          modifier = Modifier.weight(1f),
+        )
+        val resetInteraction = rememberPressHapticInteractionSource()
+        TextButton(
+          onClick = {
+            TouchTelemetry.recordControlHandled("tune_camera_reset_button")
+            onReset()
+          },
+          interactionSource = resetInteraction,
+          modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp).testTag("tune_camera_reset_button"),
+        ) {
+          Text(
+            text = stringResource(R.string.action_reset),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.innerPressScale(resetInteraction),
+          )
+        }
+        val closeInteraction = rememberPressHapticInteractionSource()
+        IconButton(
+          onClick = {
+            TouchTelemetry.recordControlHandled("tune_camera_close_button")
+            onClose()
+          },
+          interactionSource = closeInteraction,
+          modifier = Modifier.size(48.dp).testTag("tune_camera_close_button"),
+        ) {
+          Icon(
+            imageVector = Icons.Default.Close,
+            contentDescription = stringResource(R.string.action_close),
+            modifier = Modifier.innerPressScale(closeInteraction).size(20.dp),
+          )
+        }
+      }
+
+      HorizontalDivider(color = roadColors.divider)
+
+      Column(
+        modifier = Modifier.fillMaxWidth().weight(1f, fill = false).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+      ) {
+        TuneSliderRow(
+          label = stringResource(R.string.tune_camera_distance),
+          valueText = String.format(Locale.US, "%+.1f", curZoomTrim),
+          value = curZoomTrim,
+          valueRange = -2.0f..1.0f,
+          onValueChange = { v ->
+            val stepped = ((v * 10f).roundToInt() / 10.0)
+            onUpdateTuning(stepped, null, null, null)
+          },
+          testTag = "tune_camera_distance_slider",
+        )
+        TuneSliderRow(
+          label = stringResource(R.string.tune_camera_tilt),
+          valueText = "${curTilt.roundToInt()}°",
+          value = curTilt,
+          valueRange = 40f..75f,
+          onValueChange = { v ->
+            onUpdateTuning(null, v.roundToInt().toDouble(), null, null)
+          },
+          testTag = "tune_camera_tilt_slider",
+        )
+        TuneSliderRow(
+          label = stringResource(R.string.tune_camera_vehicle_pos),
+          valueText = "${curPosPct.roundToInt()}%",
+          value = curPosPct,
+          valueRange = 65f..90f,
+          onValueChange = { v ->
+            onUpdateTuning(null, null, v.roundToInt() / 100.0, null)
+          },
+          testTag = "tune_camera_pos_slider",
+        )
+        TuneSliderRow(
+          label = stringResource(R.string.tune_camera_curve_lean),
+          valueText = "${curLean.roundToInt()}%",
+          value = curLean,
+          valueRange = 0f..100f,
+          onValueChange = { v ->
+            onUpdateTuning(null, null, null, v.roundToInt())
+          },
+          testTag = "tune_camera_lean_slider",
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun TuneSliderRow(
+  label: String,
+  valueText: String,
+  value: Float,
+  valueRange: ClosedFloatingPointRange<Float>,
+  onValueChange: (Float) -> Unit,
+  testTag: String,
+) {
+  val interaction = rememberPressHapticInteractionSource()
+  Row(
+    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+  ) {
+    Text(
+      text = label,
+      fontSize = 12.sp,
+      fontWeight = FontWeight.SemiBold,
+      color = MaterialTheme.colorScheme.onSurface,
+      modifier = Modifier.width(104.dp),
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+    )
+    Slider(
+      value = value,
+      onValueChange = {
+        TouchTelemetry.recordControlHandled(testTag)
+        onValueChange(it)
+      },
+      valueRange = valueRange,
+      interactionSource = interaction,
+      modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag(testTag),
+    )
+    Text(
+      text = valueText,
+      fontFamily = FontFamily.Monospace,
+      fontSize = 12.sp,
+      fontWeight = FontWeight.Bold,
+      color = MaterialTheme.colorScheme.primary,
+      modifier = Modifier.width(44.dp),
+    )
+  }
+}
+

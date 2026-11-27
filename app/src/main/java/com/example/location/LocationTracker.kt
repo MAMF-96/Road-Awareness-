@@ -6,6 +6,8 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import com.example.BuildConfig
 import com.example.config.AppConfig
@@ -80,6 +82,28 @@ class LocationTracker(context: Context) {
 
   private var isTrackingRequested = false
   @Volatile private var isLiveCallbacksRegistered = false
+  private var locationThread: HandlerThread? = null
+  private var locationHandler: Handler? = null
+
+  private fun ensureLocationLooper(): Pair<Looper, Handler> {
+    synchronized(this) {
+      val existingThread = locationThread
+      val existingHandler = locationHandler
+      if (existingThread != null && existingThread.isAlive && existingHandler != null) {
+        return existingThread.looper to existingHandler
+      }
+      val thread = HandlerThread("RoadAwarenessLocation").apply { start() }
+      val handler = Handler(thread.looper)
+      locationThread = thread
+      locationHandler = handler
+      return thread.looper to handler
+    }
+  }
+
+  fun isUsingMainLooper(): Boolean {
+    val looper = locationThread?.looper ?: return false
+    return looper == Looper.getMainLooper()
+  }
 
   private fun updateSmoothedCompass(rawAzimuthDeg: Double) {
     if (mockEnabledAtomic.get() || !isLiveCallbacksRegistered) return
@@ -207,6 +231,7 @@ class LocationTracker(context: Context) {
         .setMinUpdateDistanceMeters(2.0f)
         .build()
 
+    val (bgLooper, bgHandler) = ensureLocationLooper()
     runCatching {
       fusedClient.lastLocation.addOnSuccessListener { loc ->
         if (mockEnabledAtomic.get() || !isLiveCallbacksRegistered) return@addOnSuccessListener
@@ -234,14 +259,14 @@ class LocationTracker(context: Context) {
           emitLiveSnapshot()
         }
       }
-      fusedClient.requestLocationUpdates(req, locationCallback, Looper.getMainLooper())
+      fusedClient.requestLocationUpdates(req, locationCallback, bgLooper)
     }
 
     if (rotationSensor != null) {
-      sensorManager?.registerListener(sensorListener, rotationSensor, SensorManager.SENSOR_DELAY_UI)
+      sensorManager?.registerListener(sensorListener, rotationSensor, SensorManager.SENSOR_DELAY_UI, bgHandler)
     } else {
-      accelSensor?.let { sensorManager?.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_UI) }
-      magnetSensor?.let { sensorManager?.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_UI) }
+      accelSensor?.let { sensorManager?.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_UI, bgHandler) }
+      magnetSensor?.let { sensorManager?.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_UI, bgHandler) }
     }
   }
 
@@ -249,6 +274,15 @@ class LocationTracker(context: Context) {
     isLiveCallbacksRegistered = false
     runCatching { fusedClient.removeLocationUpdates(locationCallback) }
     runCatching { sensorManager?.unregisterListener(sensorListener) }
+  }
+
+  fun shutdown() {
+    stopTracking()
+    synchronized(this) {
+      runCatching { locationThread?.quitSafely() }
+      locationThread = null
+      locationHandler = null
+    }
   }
 
   fun startTracking() {

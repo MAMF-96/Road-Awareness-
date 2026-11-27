@@ -1,6 +1,8 @@
 package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
@@ -13,15 +15,14 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -32,7 +33,6 @@ import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Directions
-import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Loop
@@ -46,17 +46,21 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
@@ -65,10 +69,13 @@ import com.example.data.model.BilingualName
 import com.example.data.model.BranchStatus
 import com.example.data.model.FeatureType
 import com.example.data.model.LadderOrder
+import com.example.data.model.LadderTextSize
+import com.example.data.model.NameOrder
 import com.example.data.model.PassByRelation
 import com.example.data.model.RelativeDirection
 import com.example.data.model.RoadFeature
 import com.example.data.model.UnitSystem
+import com.example.domain.GeoMath
 import com.example.ui.theme.GlassSurface
 import com.example.ui.theme.LocalGlassConfig
 import com.example.ui.theme.LocalRoadColors
@@ -241,6 +248,8 @@ fun RoadLadderSection(
   onSelectFeature: (Int) -> Unit,
   onExpandRequest: () -> Unit,
   modifier: Modifier = Modifier,
+  textSize: LadderTextSize = LadderTextSize.LARGE,
+  nameOrder: NameOrder = LocalNameOrder.current,
 ) {
   val allRows =
     RoadLadderBuilder.buildRows(
@@ -253,24 +262,23 @@ fun RoadLadderSection(
 
   if (allRows.isEmpty()) return
 
-  val roadColors = LocalRoadColors.current
   val isDark = LocalGlassConfig.current.isDark
+  val nearestRowId = allRows.filterNot { it.isLoadingContinues }.minByOrNull { it.distanceMeters }?.id
 
   BoxWithConstraints(
-    modifier = modifier.fillMaxSize().testTag("road_ladder_section"),
+    modifier = modifier.fillMaxSize().padding(horizontal = 16.dp).testTag("road_ladder_section"),
   ) {
     val availH = maxHeight
-    val userMarkerH = 18.dp
-    val chipReserveH = if (allRows.size > 4) 24.dp else 0.dp
-    val estRowH = if (compactMode) 28.dp else 36.dp
+    val userMarkerH = 24.dp
+    val chipReserveH = if (allRows.size > 3) 26.dp else 0.dp
+    val estRowH = if (compactMode) 62.dp else 72.dp
     val maxWholeRows =
       if (compactMode) {
-        ((availH - userMarkerH - chipReserveH) / estRowH).toInt().coerceAtLeast(1)
+        ((availH - userMarkerH - chipReserveH) / estRowH).toInt().coerceIn(2, 5)
       } else {
         allRows.size
       }
 
-    // In NEAREST_AT_BOTTOM keep the rows nearest to user (at end of list); in NEAREST_AT_TOP keep nearest (at start).
     val visibleRows =
       if (allRows.size <= maxWholeRows) {
         allRows
@@ -282,7 +290,6 @@ fun RoadLadderSection(
     val overflowCount = (allRows.size - visibleRows.size).coerceAtLeast(0)
 
     Box(modifier = Modifier.fillMaxSize()) {
-      // Continuous vertical centerline representing your road
       Box(
         modifier =
           Modifier
@@ -305,48 +312,53 @@ fun RoadLadderSection(
           LadderOverflowChip(
             overflowCount = overflowCount,
             onClick = onExpandRequest,
-            modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 2.dp),
+            modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 4.dp),
           )
         }
 
         if (ladderOrder == LadderOrder.NEAREST_AT_TOP) {
-          LadderYouHerePill(modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 2.dp))
+          LadderYouHerePill(modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 4.dp))
         }
 
         Column(
           modifier = Modifier.fillMaxWidth().weight(1f, fill = false),
-          verticalArrangement = Arrangement.spacedBy(2.dp),
+          verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-          visibleRows.forEach { row ->
-            AnimatedVisibility(
-              visible = true,
-              enter = fadeIn(),
-              exit = fadeOut(),
-            ) {
-              RoadLadderRowItem(
-                row = row,
-                unitSystem = unitSystem,
-                compact = compactMode,
-                onClick = {
-                  row.featureIndex?.let { idx ->
-                    TouchTelemetry.recordControlHandled("ladder_row_${row.id}")
-                    onSelectFeature(idx)
-                  }
-                },
-              )
+          visibleRows.forEachIndexed { rowIndex, row ->
+            key(row.id) {
+              AnimatedVisibility(
+                visible = true,
+                enter = fadeIn(tween(180)) + expandVertically(tween(180)),
+                exit = fadeOut(tween(150)),
+              ) {
+                RoadLadderRowItem(
+                  row = row,
+                  rowIndex = rowIndex,
+                  isNearest = row.id == nearestRowId,
+                  unitSystem = unitSystem,
+                  textSize = textSize,
+                  nameOrder = nameOrder,
+                  onClick = {
+                    row.featureIndex?.let { idx ->
+                      TouchTelemetry.recordControlHandled("ladder_row_${row.id}")
+                      onSelectFeature(idx)
+                    }
+                  },
+                )
+              }
             }
           }
         }
 
         if (ladderOrder == LadderOrder.NEAREST_AT_BOTTOM) {
-          LadderYouHerePill(modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 2.dp))
+          LadderYouHerePill(modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 4.dp))
         }
 
         if (overflowCount > 0 && ladderOrder == LadderOrder.NEAREST_AT_TOP) {
           LadderOverflowChip(
             overflowCount = overflowCount,
             onClick = onExpandRequest,
-            modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 2.dp),
+            modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 4.dp),
           )
         }
       }
@@ -361,22 +373,22 @@ private fun LadderYouHerePill(modifier: Modifier = Modifier) {
       modifier
         .clip(CircleShape)
         .background(RoadColors.Primary)
-        .padding(horizontal = 7.dp, vertical = 1.dp)
+        .padding(horizontal = 10.dp, vertical = 2.dp)
         .testTag("ladder_you_here"),
     verticalAlignment = Alignment.CenterVertically,
-    horizontalArrangement = Arrangement.spacedBy(3.dp),
+    horizontalArrangement = Arrangement.spacedBy(4.dp),
   ) {
     Icon(
       imageVector = Icons.Default.Navigation,
       contentDescription = stringResource(R.string.ladder_you_here),
       tint = Color.White,
-      modifier = Modifier.size(10.dp),
+      modifier = Modifier.size(13.dp),
     )
     Text(
       text = stringResource(R.string.ladder_you_here),
       color = Color.White,
-      fontSize = 9.5.sp,
-      lineHeight = 11.sp,
+      fontSize = 13.sp,
+      lineHeight = 16.sp,
       fontWeight = FontWeight.Bold,
       maxLines = 1,
     )
@@ -399,17 +411,17 @@ private fun LadderOverflowChip(
     interactionSource = interactionSource,
     shape = CircleShape,
     color =
-      if (pressed) MaterialTheme.colorScheme.primary.copy(alpha = 0.24f)
-      else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.80f),
-    modifier = modifier.heightIn(min = 20.dp).testTag("ladder_overflow_chip"),
+      if (pressed) MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)
+      else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.88f),
+    modifier = modifier.heightIn(min = 24.dp).testTag("ladder_overflow_chip"),
   ) {
     Text(
       text = stringResource(R.string.ladder_more_rows_format, overflowCount),
       color = MaterialTheme.colorScheme.onPrimaryContainer,
-      fontSize = 10.sp,
-      lineHeight = 12.sp,
+      fontSize = 13.sp,
+      lineHeight = 16.sp,
       fontWeight = FontWeight.Bold,
-      modifier = Modifier.innerPressScale(interactionSource).padding(horizontal = 8.dp, vertical = 2.dp),
+      modifier = Modifier.innerPressScale(interactionSource).padding(horizontal = 10.dp, vertical = 3.dp),
     )
   }
 }
@@ -417,22 +429,24 @@ private fun LadderOverflowChip(
 @Composable
 private fun RoadLadderRowItem(
   row: RoadLadderRow,
+  rowIndex: Int,
+  isNearest: Boolean,
   unitSystem: UnitSystem,
-  compact: Boolean,
+  textSize: LadderTextSize,
+  nameOrder: NameOrder,
   onClick: () -> Unit,
 ) {
-  val roadColors = LocalRoadColors.current
   val isDark = LocalGlassConfig.current.isDark
 
   if (row.isLoadingContinues) {
     GlassSurface(
-      shape = RoundedCornerShape(10.dp),
+      shape = RoundedCornerShape(12.dp),
       isLighterInner = true,
       withShadow = false,
-      modifier = Modifier.fillMaxWidth().testTag("ladder_loading_row"),
+      modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("ladder_loading_row"),
     ) {
       Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
       ) {
@@ -440,12 +454,12 @@ private fun RoadLadderRowItem(
           imageVector = Icons.Default.Sync,
           contentDescription = null,
           tint = MaterialTheme.colorScheme.primary,
-          modifier = Modifier.size(12.dp),
+          modifier = Modifier.size(16.dp),
         )
-        Spacer(modifier = Modifier.width(4.dp))
+        Spacer(modifier = Modifier.width(6.dp))
         Text(
           text = stringResource(R.string.ladder_continues_loading),
-          fontSize = 10.5.sp,
+          fontSize = 14.sp,
           fontWeight = FontWeight.SemiBold,
           color = MaterialTheme.colorScheme.primary,
           maxLines = 1,
@@ -459,121 +473,207 @@ private fun RoadLadderRowItem(
     if (row.featureIndex != null) RoadColors.pinColorForIndex(row.featureIndex)
     else MaterialTheme.colorScheme.primary
   val borderMod =
-    if (row.isSelected) Modifier.border(1.4.dp, pinColor, RoundedCornerShape(10.dp))
-    else Modifier
+    when {
+      isNearest -> Modifier.border(1.6.dp, pinColor, RoundedCornerShape(12.dp))
+      row.isSelected -> Modifier.border(1.4.dp, pinColor.copy(alpha = 0.85f), RoundedCornerShape(12.dp))
+      else -> Modifier
+    }
+
+  val baseDarkAlpha = if (rowIndex % 2 == 0) 0.06f else 0.03f
+  val overlayColor =
+    if (isDark) {
+      val extra = (if (isNearest) 0.04f else 0f) + (if (row.isSelected) 0.04f else 0f)
+      Color.White.copy(alpha = (baseDarkAlpha + extra).coerceAtMost(0.16f))
+    } else {
+      val baseLight = if (rowIndex % 2 == 0) 0.05f else 0.02f
+      val extra = (if (isNearest) 0.05f else 0f) + (if (row.isSelected) 0.04f else 0f)
+      pinColor.copy(alpha = (baseLight + extra).coerceAtMost(0.16f))
+    }
 
   val rowModifier =
     if (row.featureIndex != null) {
       Modifier
         .fillMaxWidth()
+        .heightIn(min = 60.dp)
         .then(borderMod)
-        .clip(RoundedCornerShape(10.dp))
+        .clip(RoundedCornerShape(12.dp))
         .clickable(onClick = onClick)
         .testTag("ladder_row_${row.id}")
     } else {
       Modifier
         .fillMaxWidth()
+        .heightIn(min = 60.dp)
         .then(borderMod)
         .testTag("ladder_row_${row.id}")
     }
 
+  val primaryTextColor = if (isDark) Color.White else Color(0xFF0F172A)
+  val secondaryTextColor = if (isDark) Color(0xFFC9D1DC) else Color(0xFF334155)
+
   GlassSurface(
-    shape = RoundedCornerShape(10.dp),
+    shape = RoundedCornerShape(12.dp),
     isLighterInner = true,
     withShadow = false,
-    tintOverlay =
-      if (row.isSelected) pinColor.copy(alpha = if (isDark) 0.14f else 0.08f)
-      else Color.Transparent,
+    tintOverlay = overlayColor,
     modifier = rowModifier,
   ) {
     Row(
-      modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = if (compact) 2.dp else 4.dp),
+      modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
       verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(4.dp),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-      // Left side branches
-      Box(
+      // Left side branches (weight 1f)
+      Column(
         modifier = Modifier.weight(1f),
-        contentAlignment = Alignment.CenterEnd,
+        horizontalAlignment = Alignment.End,
+        verticalArrangement = Arrangement.spacedBy(3.dp),
       ) {
-        val left = row.leftBranches.firstOrNull()
-        if (left != null) {
-          LadderSideBranchText(
-            branch = left,
-            alignEnd = true,
-            compact = compact,
-            extraCount = (row.leftBranches.size - 1).coerceAtLeast(0),
-          )
-        } else if (row.rightBranches.isEmpty() && row.aheadBranch == null) {
-          // Centered event label split softly or shown right of badge
-          Spacer(modifier = Modifier.width(1.dp))
+        if (row.leftBranches.isNotEmpty()) {
+          val shown = row.leftBranches.take(2)
+          shown.forEach { br ->
+            LadderSideBranchBlock(
+              branch = br,
+              alignEnd = true,
+              textSize = textSize,
+              nameOrder = nameOrder,
+              primaryColor = primaryTextColor,
+              secondaryColor = secondaryTextColor,
+            )
+          }
+          val extra = row.leftBranches.size - shown.size
+          if (extra > 0) {
+            Text(
+              text = stringResource(R.string.ladder_more_rows_format, extra),
+              fontSize = 13.sp,
+              fontWeight = FontWeight.Bold,
+              color = MaterialTheme.colorScheme.primary,
+              maxLines = 1,
+            )
+          }
         }
       }
 
-      // Centerline pill: distance + type icon
-      Row(
+      // Centerline pill: minimum 80.dp width, bold 20/22/24sp distance + 12sp type label & icon
+      val pillHighlight = row.isSelected || isNearest
+      val pillBg =
+        if (pillHighlight) pinColor
+        else if (isDark) Color(0xFF1E293B)
+        else pinColor.copy(alpha = 0.16f)
+      val pillTextColor =
+        if (pillHighlight || isDark) Color.White
+        else Color(0xFF0F172A)
+      val pillTypeColor =
+        if (pillHighlight) Color.White.copy(alpha = 0.92f)
+        else if (isDark) Color(0xFFC9D1DC)
+        else Color(0xFF334155)
+
+      Column(
         modifier =
           Modifier
-            .clip(CircleShape)
-            .background(if (row.isSelected) pinColor else pinColor.copy(alpha = 0.18f))
-            .padding(horizontal = 5.dp, vertical = 1.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
+            .widthIn(min = 80.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(pillBg)
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
       ) {
-        Icon(
-          imageVector = ladderTypeIcon(row.featureType),
-          contentDescription = featureTypeTitle(row.featureType),
-          tint = if (row.isSelected) Color.White else pinColor,
-          modifier = Modifier.size(11.dp),
-        )
         Text(
           text = formatRoadDistance(row.distanceMeters, unitSystem),
-          fontSize = 10.sp,
-          lineHeight = 12.sp,
+          fontSize = textSize.distanceSp.sp,
+          lineHeight = (textSize.distanceSp + 2).sp,
           fontWeight = FontWeight.Bold,
-          color = if (row.isSelected) Color.White else MaterialTheme.colorScheme.onSurface,
+          color = pillTextColor,
           maxLines = 1,
+          softWrap = false,
+          textAlign = TextAlign.Center,
         )
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+          Icon(
+            imageVector = ladderTypeIcon(row.featureType),
+            contentDescription = featureTypeTitle(row.featureType),
+            tint = if (pillHighlight) Color.White else pinColor,
+            modifier = Modifier.size(13.dp),
+          )
+          Text(
+            text = featureTypeTitle(row.featureType),
+            fontSize = 12.sp,
+            lineHeight = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = pillTypeColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
       }
 
-      // Right side branches OR centered/non-branching event label
-      Box(
+      // Right side branches OR centered/non-branching event label (weight 1f)
+      Column(
         modifier = Modifier.weight(1f),
-        contentAlignment = Alignment.CenterStart,
+        horizontalAlignment = Alignment.Start,
+        verticalArrangement = Arrangement.spacedBy(3.dp),
       ) {
-        val right = row.rightBranches.firstOrNull()
         when {
-          right != null -> {
-            LadderSideBranchText(
-              branch = right,
-              alignEnd = false,
-              compact = compact,
-              extraCount = (row.rightBranches.size - 1).coerceAtLeast(0),
-            )
+          row.rightBranches.isNotEmpty() -> {
+            val shown = row.rightBranches.take(2)
+            shown.forEach { br ->
+              LadderSideBranchBlock(
+                branch = br,
+                alignEnd = false,
+                textSize = textSize,
+                nameOrder = nameOrder,
+                primaryColor = primaryTextColor,
+                secondaryColor = secondaryTextColor,
+              )
+            }
+            val extra = row.rightBranches.size - shown.size
+            if (extra > 0) {
+              Text(
+                text = stringResource(R.string.ladder_more_rows_format, extra),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+              )
+            }
           }
           row.aheadBranch != null -> {
-            LadderSideBranchText(
+            LadderSideBranchBlock(
               branch = row.aheadBranch,
               alignEnd = false,
-              compact = compact,
-              extraCount = 0,
+              textSize = textSize,
+              nameOrder = nameOrder,
+              primaryColor = primaryTextColor,
+              secondaryColor = secondaryTextColor,
             )
           }
           row.leftBranches.isEmpty() -> {
-            val evtLabel =
-              row.centerName?.primaryText
-                ?: row.centerName?.ref
-                ?: featureTypeTitle(row.featureType)
+            val (cPrimary, cSecondary) = resolveDisplayLines(row.centerName, nameOrder)
+            val evtPrimary = cPrimary ?: cSecondary ?: featureTypeTitle(row.featureType)
             Text(
-              text = evtLabel,
-              fontFamily = if (BilingualName.containsArabic(evtLabel)) NotoArabicFontFamily else RobotoFontFamily,
-              fontSize = if (compact) 11.sp else 12.sp,
-              lineHeight = if (compact) 12.5.sp else 14.sp,
+              text = evtPrimary,
+              fontFamily = if (BilingualName.containsArabic(evtPrimary)) NotoArabicFontFamily else RobotoFontFamily,
+              fontSize = textSize.primarySp.sp,
+              lineHeight = (textSize.primarySp + 3).sp,
               fontWeight = FontWeight.SemiBold,
-              color = MaterialTheme.colorScheme.onSurface,
+              color = primaryTextColor,
               maxLines = 2,
-              overflow = TextOverflow.Clip,
+              overflow = TextOverflow.Ellipsis,
             )
+            if (cPrimary != null && cSecondary != null) {
+              Text(
+                text = cSecondary,
+                fontFamily = if (BilingualName.containsArabic(cSecondary)) NotoArabicFontFamily else RobotoFontFamily,
+                fontSize = textSize.secondarySp.sp,
+                lineHeight = (textSize.secondarySp + 3).sp,
+                fontWeight = FontWeight.Normal,
+                color = secondaryTextColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+              )
+            }
           }
         }
       }
@@ -582,87 +682,145 @@ private fun RoadLadderRowItem(
 }
 
 @Composable
-private fun LadderSideBranchText(
+private fun LadderSideBranchBlock(
   branch: RoadLadderBranch,
   alignEnd: Boolean,
-  compact: Boolean,
-  extraCount: Int,
+  textSize: LadderTextSize,
+  nameOrder: NameOrder,
+  primaryColor: Color,
+  secondaryColor: Color,
 ) {
   val roadColors = LocalRoadColors.current
-  val unnamedFallback = stringResource(R.string.ladder_unnamed_street)
+  val unnamedFallback = unnamedRoadWithClassText(branch.highway)
   val unknownDest = stringResource(R.string.ladder_unknown_dest)
 
-  val rawPrimary =
-    when {
-      branch.isExitRamp -> {
-        val dest = branch.leadsTo?.takeIf { it.isNotBlank() } ?: branch.name.primaryText ?: unknownDest
-        stringResource(R.string.ladder_ramp_to_format, dest)
-      }
-      branch.name.hasAny -> {
-        val ar = branch.name.arabic?.takeIf { it.isNotBlank() }
-        val en = branch.name.english?.takeIf { it.isNotBlank() } ?: branch.name.ref?.takeIf { it.isNotBlank() }
-        when {
-          ar != null && en != null && ar != en -> "$ar\n$en"
-          ar != null -> ar
-          en != null -> en
-          else -> unnamedFallback
-        }
-      }
-      else -> unnamedFallback
+  val (resolvedPrimary, resolvedSecondary) =
+    if (branch.isExitRamp) {
+      val (destFirst, destSecond) = resolveDisplayLines(branch.name, nameOrder)
+      val dest = branch.leadsTo?.takeIf { it.isNotBlank() } ?: destFirst ?: destSecond ?: unknownDest
+      stringResource(R.string.ladder_ramp_to_format, dest) to null
+    } else if (branch.name.hasAny) {
+      resolveDisplayLines(branch.name, nameOrder)
+    } else {
+      unnamedFallback to null
     }
+
+  val primaryLine = resolvedPrimary ?: resolvedSecondary ?: unnamedFallback
+  val secondaryLine = if (resolvedPrimary != null) resolvedSecondary else null
 
   val relSuffix =
     when (branch.passByRelation) {
-      PassByRelation.ACROSS_MEDIAN -> " · median"
-      PassByRelation.VIA_FRONTAGE_OR_RAMP -> " · via ramp"
-      PassByRelation.GRADE_SEPARATED -> branch.leadsTo?.let { " · $it" } ?: " · overpass"
-      PassByRelation.NOT_CONNECTED -> " · no link"
-      PassByRelation.DIRECT, null -> ""
+      PassByRelation.ACROSS_MEDIAN -> "median"
+      PassByRelation.VIA_FRONTAGE_OR_RAMP -> "via ramp"
+      PassByRelation.GRADE_SEPARATED -> branch.leadsTo ?: "overpass"
+      PassByRelation.NOT_CONNECTED -> "no link"
+      PassByRelation.DIRECT, null -> null
     }
-  val displayText = if (extraCount > 0) "$rawPrimary$relSuffix (+$extraCount)" else "$rawPrimary$relSuffix"
 
-  val (statusIcon, statusTint) =
+  val (statusIcon, statusTint, statusWord) =
     when (branch.status) {
-      BranchStatus.OPEN -> Icons.Default.CheckCircle to roadColors.openText
-      BranchStatus.BLOCKED -> Icons.Default.Close to roadColors.blockedText
-      BranchStatus.UNVERIFIED -> Icons.Default.HelpOutline to roadColors.unverifiedText
+      BranchStatus.OPEN -> Triple(Icons.Default.CheckCircle, roadColors.openText, null)
+      BranchStatus.BLOCKED -> Triple(Icons.Default.Close, roadColors.blockedText, stringResource(R.string.branch_blocked))
+      BranchStatus.UNVERIFIED -> Triple(Icons.Default.HelpOutline, roadColors.unverifiedText, stringResource(R.string.branch_unverified))
     }
 
-  Row(
-    verticalAlignment = Alignment.CenterVertically,
-    horizontalArrangement = if (alignEnd) Arrangement.End else Arrangement.Start,
+  val textAlign = if (alignEnd) TextAlign.End else TextAlign.Start
+
+  Column(
     modifier = Modifier.fillMaxWidth(),
+    horizontalAlignment = if (alignEnd) Alignment.End else Alignment.Start,
+    verticalArrangement = Arrangement.spacedBy(1.dp),
   ) {
-    if (alignEnd) {
-      Icon(
-        imageVector = statusIcon,
-        contentDescription = branch.status.name,
-        tint = statusTint,
-        modifier = Modifier.size(10.dp),
-      )
-      Spacer(modifier = Modifier.width(3.dp))
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = if (alignEnd) Arrangement.End else Arrangement.Start,
+      modifier = Modifier.fillMaxWidth(),
+    ) {
+      if (alignEnd) {
+        Icon(
+          imageVector = statusIcon,
+          contentDescription = statusWord ?: branch.status.name,
+          tint = statusTint,
+          modifier = Modifier.size(14.dp),
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+      }
+      val primaryDir = if (GeoMath.isRtlScript(primaryLine)) LayoutDirection.Rtl else LayoutDirection.Ltr
+      CompositionLocalProvider(LocalLayoutDirection provides primaryDir) {
+        Text(
+          text = primaryLine,
+          fontFamily = if (BilingualName.containsArabic(primaryLine)) NotoArabicFontFamily else RobotoFontFamily,
+          fontSize = textSize.primarySp.sp,
+          lineHeight = (textSize.primarySp + 3).sp,
+          fontWeight = FontWeight.SemiBold,
+          color = primaryColor,
+          maxLines = 2,
+          softWrap = true,
+          overflow = TextOverflow.Ellipsis,
+          textAlign = textAlign,
+          modifier = Modifier.weight(1f, fill = false),
+        )
+      }
+      if (!alignEnd) {
+        Spacer(modifier = Modifier.width(4.dp))
+        Icon(
+          imageVector = statusIcon,
+          contentDescription = statusWord ?: branch.status.name,
+          tint = statusTint,
+          modifier = Modifier.size(14.dp),
+        )
+      }
     }
-    Text(
-      text = displayText,
-      fontFamily = if (BilingualName.containsArabic(displayText)) NotoArabicFontFamily else RobotoFontFamily,
-      fontSize = if (compact) 11.sp else 12.sp,
-      lineHeight = if (compact) 12.5.sp else 14.sp,
-      fontWeight = FontWeight.SemiBold,
-      color = MaterialTheme.colorScheme.onSurface,
-      maxLines = 2,
-      softWrap = true,
-      overflow = TextOverflow.Clip,
-      textAlign = if (alignEnd) TextAlign.End else TextAlign.Start,
-      modifier = Modifier.weight(1f, fill = false),
-    )
-    if (!alignEnd) {
-      Spacer(modifier = Modifier.width(3.dp))
-      Icon(
-        imageVector = statusIcon,
-        contentDescription = branch.status.name,
-        tint = statusTint,
-        modifier = Modifier.size(10.dp),
-      )
+
+    if (!secondaryLine.isNullOrBlank()) {
+      val secDir = if (GeoMath.isRtlScript(secondaryLine)) LayoutDirection.Rtl else LayoutDirection.Ltr
+      CompositionLocalProvider(LocalLayoutDirection provides secDir) {
+        Text(
+          text = secondaryLine,
+          fontFamily = if (BilingualName.containsArabic(secondaryLine)) NotoArabicFontFamily else RobotoFontFamily,
+          fontSize = textSize.secondarySp.sp,
+          lineHeight = (textSize.secondarySp + 2).sp,
+          fontWeight = FontWeight.Normal,
+          color = secondaryColor,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+          textAlign = textAlign,
+          modifier = Modifier.fillMaxWidth(),
+        )
+      }
+    }
+
+    if (statusWord != null || relSuffix != null) {
+      Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = if (alignEnd) Arrangement.End else Arrangement.Start,
+        modifier = Modifier.fillMaxWidth(),
+      ) {
+        if (statusWord != null) {
+          Text(
+            text = statusWord,
+            fontSize = 12.sp,
+            lineHeight = 14.sp,
+            fontWeight = FontWeight.Bold,
+            color = statusTint,
+            maxLines = 1,
+          )
+          if (relSuffix != null) {
+            Spacer(modifier = Modifier.width(4.dp))
+          }
+        }
+        if (relSuffix != null) {
+          Text(
+            text = relSuffix,
+            fontSize = 13.sp,
+            lineHeight = 15.sp,
+            fontWeight = FontWeight.Medium,
+            color = secondaryColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+      }
     }
   }
 }
