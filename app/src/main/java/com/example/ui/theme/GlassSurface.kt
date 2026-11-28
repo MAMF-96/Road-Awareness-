@@ -61,27 +61,27 @@ object GlassTokens {
   val LightSoftShadowColor = Color(0x47000000) // 28% black
   val LightTightShadowColor = Color(0x29000000) // 16% black
 
-  // Dark translucent gradients (#121821 at 78–88%, unchanged)
-  val DarkFillTop = Color(0xDB121821) // 86%
-  val DarkFillBottom = Color(0xC7121821) // 78%
-  val DarkCardFillTop = Color(0xE0121821) // 88%
-  val DarkCardFillBottom = Color(0xD60E141C) // 84%
-  val DarkInnerFillTop = Color(0xB31E2736) // 70%
-  val DarkInnerFillBottom = Color(0x99161E2B) // 60%
-  val DarkBorderTopLeft = Color(0x59FFFFFF) // 35%
-  val DarkBorderBottomRight = Color(0x14FFFFFF) // 8%
+  // Dark near-opaque gradients (>= 92% opacity for high-contrast in-car readability)
+  val DarkFillTop = Color(0xF2121821) // 95%
+  val DarkFillBottom = Color(0xEB121821) // 92%
+  val DarkCardFillTop = Color(0xF5121821) // 96%
+  val DarkCardFillBottom = Color(0xEB0E141C) // 92%
+  val DarkInnerFillTop = Color(0xEB1C2534) // 92%
+  val DarkInnerFillBottom = Color(0xEB161E2B) // 92%
+  val DarkBorderTopLeft = Color(0x66FFFFFF) // 40%
+  val DarkBorderBottomRight = Color(0x1FFFFFFF) // 12%
   val DarkTopInnerHighlight = Color(0x47FFFFFF)
   val DarkSolidSurface = Color(0xFF121821)
   val DarkSolidInner = Color(0xFF1C2533)
   val DarkSolidBorder = Color(0xFF334155)
 
-  // Dark translucent gradients over light map (>= 88% opacity for crisp readability)
-  val DarkOverLightFillTop = Color(0xE8121821) // 91%
-  val DarkOverLightFillBottom = Color(0xE30E141C) // 89%
-  val DarkOverLightCardFillTop = Color(0xEB121821) // 92%
-  val DarkOverLightCardFillBottom = Color(0xE30E141C) // 89%
-  val DarkOverLightInnerFillTop = Color(0xC71E2736) // 78%
-  val DarkOverLightInnerFillBottom = Color(0xB8161E2B) // 72%
+  // Dark gradients over light map (>= 92% opacity for crisp readability)
+  val DarkOverLightFillTop = Color(0xF2121821) // 95%
+  val DarkOverLightFillBottom = Color(0xEB0E141C) // 92%
+  val DarkOverLightCardFillTop = Color(0xF5121821) // 96%
+  val DarkOverLightCardFillBottom = Color(0xEB0E141C) // 92%
+  val DarkOverLightInnerFillTop = Color(0xEB1C2534) // 92%
+  val DarkOverLightInnerFillBottom = Color(0xEB161E2B) // 92%
   val DarkOverLightSoftShadowColor = Color(0x3D000000) // ~24% black
   val DarkOverLightTightShadowColor = Color(0x24000000) // ~14% black
 

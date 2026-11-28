@@ -3,6 +3,8 @@ package com.example.domain
 import com.example.config.AppConfig
 import com.example.data.model.AheadAnalysisResult
 import com.example.data.model.AheadTimelineEntry
+import com.example.data.model.BandRelationCounts
+import com.example.data.model.BandRoadDiagnostic
 import com.example.data.model.BilingualName
 import com.example.data.model.BranchStatus
 import com.example.data.model.DividedRoadInfo
@@ -14,6 +16,7 @@ import com.example.data.model.LandmarkAheadItem
 import com.example.data.model.LocalPoint
 import com.example.data.model.OsmTags
 import com.example.data.model.OsmWay
+import com.example.data.model.PassByRelation
 import com.example.data.model.PoiCategory
 import com.example.data.model.PoiItem
 import com.example.data.model.RelativeDirection
@@ -404,7 +407,7 @@ object AheadGraphAnalyzer {
           if (nodeId != null) {
             (graph.nodeToWays[nodeId] ?: emptyList())
               .mapNotNull { graph.ways[it] }
-              .filter { isWayCountedAtNode(it, currentWay.id, mode) }
+              .filter { isWayCountedAtNode(it, currentWay.id, mode, includeMinorServices = showMinorJunctions) }
           } else {
             emptyList()
           }
@@ -416,6 +419,19 @@ object AheadGraphAnalyzer {
           val currentWayHasAheadSegment = !isEndpoint
 
           if (hasOtherWays || (isEndpoint && connectedWaysAtNode.size <= 1)) {
+            val nextHopAtNode =
+              if (isEndpoint) {
+                findContinuationWay(
+                  graph = graph,
+                  fromNodeId = nodeId,
+                  currentWay = currentWay,
+                  incomingBearing = lastIncomingBearing,
+                  visitedWayIds = visitedWayIds,
+                  mode = mode,
+                )
+              } else {
+                null
+              }
             val outgoingEdges =
               extractOutgoingEdges(
                 graph = graph,
@@ -426,6 +442,7 @@ object AheadGraphAnalyzer {
                 includeCurrentAhead = currentWayHasAheadSegment,
                 currentIdx = idx,
                 mode = mode,
+                includeMinorServices = showMinorJunctions,
               )
 
             if (outgoingEdges.isNotEmpty() || isEndpoint) {
@@ -444,6 +461,7 @@ object AheadGraphAnalyzer {
                   incomingWorld = incomingWorld,
                   edges = outgoingEdges,
                   includeCurrentAhead = currentWayHasAheadSegment,
+                  nextHop = nextHopAtNode,
                   mode = mode,
                 )
               if (feature != null) {
@@ -486,12 +504,61 @@ object AheadGraphAnalyzer {
         break
       }
 
+      val prevWay = currentWay
       currentWay = nextHop.way
       forward = nextHop.forward
       currentForkReason = nextHop.reason
       startNodeIndex = if (forward) nextHop.nodeIndex + 1 else nextHop.nodeIndex - 1
       prevNodeId = lastTraversedNodeId
       prevIdx = nextHop.nodeIndex
+
+      // Rule 3: Detect road continuation under another name/ref and emit center "Road continues as <name>"
+      if (!isRoadWorksWay(prevWay) && !isRoadWorksWay(currentWay)) {
+        val nextName = BilingualName.fromOsmTags(currentWay.tags)
+        if (nextName.hasAny &&
+          !hasSameRefOrName(prevWay.tags, currentWay.tags) &&
+          !sameRoadIdentityForDivided(prevWay.tags, currentWay.tags)
+        ) {
+          val existingIdx =
+            features.indexOfLast {
+              it.anchorNodeId == lastTraversedNodeId &&
+                it.type in setOf(
+                  FeatureType.T_JUNCTION,
+                  FeatureType.Y_JUNCTION,
+                  FeatureType.FOUR_WAY,
+                  FeatureType.MULTI_WAY,
+                  FeatureType.FORK,
+                  FeatureType.MERGE,
+                )
+            }
+          if (existingIdx >= 0) {
+            val existing = features[existingIdx]
+            if (existing.continuesAsName == null) {
+              features[existingIdx] = existing.copy(continuesAsName = nextName)
+            }
+          } else {
+            val transitionPt = currentWay.points[nextHop.nodeIndex]
+            val prevContIdx = if (prevWay.nodeIds.isNotEmpty()) prevWay.nodeIds.indexOf(lastTraversedNodeId).coerceAtLeast(0) else 0
+            val incomingW = sliceWorldPath(prevWay, prevContIdx, tracedSegments.lastOrNull()?.forward ?: forward, takeBack = true, maxMeters = 45.0)
+            val outgoingW = sliceWorldPath(currentWay, nextHop.nodeIndex, forward, takeBack = false, maxMeters = 60.0)
+            features +=
+              buildPointFeature(
+                index = features.size + 1,
+                type = FeatureType.FORK,
+                distance = accumulatedDist,
+                anchor = transitionPt,
+                nodeId = lastTraversedNodeId,
+                headingDeg = lastIncomingBearing,
+                incomingWorld = incomingW,
+                outgoingWorld = outgoingW,
+                tags = currentWay.tags,
+                source = currentWay.source,
+                ruleId = "road_continues_as_name",
+                confidence = 0.95,
+              ).copy(continuesAsName = nextName)
+          }
+        }
+      }
 
       // Stop advancing past a ROAD_WORKS way after it has been emitted at the transition
       if (isRoadWorksWay(currentWay)) break
@@ -565,6 +632,17 @@ object AheadGraphAnalyzer {
 
     // 5) Composite features strictly on the corridor ahead (Driving 800m, Walking 250m)
     val dividedRoadInfo = detectDividedRoadPartner(graph, matched, tracedSegments, mode)
+    val dividedPartnerWayIds =
+      if (dividedRoadInfo != null) {
+        graph.ways[dividedRoadInfo.partnerWayId]
+          ?.let { collectConnectedSameIdentityOneway(graph, it, mode) }
+          .orEmpty()
+          .mapTo(HashSet()) { it.id }
+      } else {
+        emptySet()
+      }
+    val tracedMainWayIds = tracedSegments.mapTo(HashSet()) { it.way.id }.apply { add(matched.way.id) }
+
     val nearbyUnreachableLinks = mutableListOf<String>()
     val groupedFeatures =
       if (!shouldAbort() && System.nanoTime() <= deadlineNs) {
@@ -594,7 +672,7 @@ object AheadGraphAnalyzer {
       }
     }
 
-    // Hard boundary check (#15): distance <= maxLookahead and anchor within 5m of main corridor path
+    // Hard boundary check + Rule 1 & 2 (main road & opposite carriageway are NEVER listed as branches)
     val boundedGrouped =
       groupedFeatures.mapNotNull { feat ->
         if (feat.distanceMeters > maxLookahead + 0.01) return@mapNotNull null
@@ -610,6 +688,11 @@ object AheadGraphAnalyzer {
           val keptBranches =
             feat.branches.filter { br ->
               if (br.distanceMeters > maxLookahead + 0.01) return@filter false
+              if (feat.type != FeatureType.ROAD_WORKS &&
+                (br.isMainContinuation || br.wayId in tracedMainWayIds || br.wayId in dividedPartnerWayIds)
+              ) {
+                return@filter false
+              }
               val dep = br.departurePoint ?: br.worldPoints.firstOrNull() ?: feat.anchor
               if (corridorWorldPts.size >= 2) {
                 GeoMath.snapToPolyline(dep, corridorWorldPts).distanceMeters <= 5.0
@@ -617,7 +700,24 @@ object AheadGraphAnalyzer {
                 GeoMath.haversineMeters(dep, matched.snappedPoint) <= 5.0
               }
             }
-          if (keptBranches.isEmpty() && feat.isInterchangeGroup()) return@mapNotNull null
+          if (keptBranches.isEmpty() && feat.continuesAsName == null && (
+              feat.isInterchangeGroup() ||
+                feat.type in setOf(
+                  FeatureType.T_JUNCTION,
+                  FeatureType.Y_JUNCTION,
+                  FeatureType.FOUR_WAY,
+                  FeatureType.MULTI_WAY,
+                  FeatureType.FORK,
+                  FeatureType.MERGE,
+                  FeatureType.OFF_RAMP,
+                  FeatureType.ON_RAMP,
+                  FeatureType.SERVICE_ROAD,
+                  FeatureType.U_TURN,
+                )
+              )
+          ) {
+            return@mapNotNull null
+          }
           feat.copy(branches = keptBranches)
         }
       }
@@ -635,19 +735,17 @@ object AheadGraphAnalyzer {
         }
       }
 
-    // Re-index top 12 features cleanly 1, 2, 3... and re-letter branch IDs 1A, 1B, 1C...
+    // Re-index ALL features across whole horizon cleanly 1, 2, 3... and re-letter branch IDs 1A, 1B...
     val indexed =
-      filteredFeatures
-        .take(12)
-        .mapIndexed { idx, feat ->
-          val num = idx + 1
-          val relettered =
-            feat.branches.mapIndexed { bIdx, branch ->
-              val letter = ('A' + bIdx)
-              branch.copy(badgeId = "$num$letter")
-            }
-          feat.copy(index = num, branches = relettered)
-        }
+      filteredFeatures.mapIndexed { idx, feat ->
+        val num = idx + 1
+        val relettered =
+          feat.branches.mapIndexed { bIdx, branch ->
+            val letter = ('A' + bIdx)
+            branch.copy(badgeId = "$num$letter")
+          }
+        feat.copy(index = num, branches = relettered)
+      }
 
     val loadedCorridorMeters =
       tracedSegments.lastOrNull()?.let { (it.cumDistAtP1 + it.segLenMeters).coerceAtMost(maxLookahead) } ?: 0.0
@@ -661,14 +759,16 @@ object AheadGraphAnalyzer {
 
     val nearGuaranteeM = if (mode == TravelMode.DRIVING) 600.0 else 250.0
     val featureTimeline =
-      filteredFeatures.mapIndexed { idx, rawFeat ->
-        val mapped = if (idx < indexed.size) indexed[idx] else rawFeat
+      indexed.map { mapped ->
         val rawTitle =
-          mapped.branches
-            .firstOrNull { it.name.hasAny }?.name
-            ?: BilingualName.fromOsmTags(mapped.osmTags)
+          when {
+            mapped.continuesAsName != null -> mapped.continuesAsName
+            else ->
+              mapped.branches.firstOrNull { it.name.hasAny }?.name
+                ?: BilingualName.fromOsmTags(mapped.osmTags)
+          }
         val branchTitle =
-          if (!rawTitle.hasAny && mapped.distanceMeters <= nearGuaranteeM && mapped.branches.isNotEmpty()) {
+          if (!rawTitle.hasAny && mapped.branches.isNotEmpty()) {
             BilingualName(arabic = "شارع بلا اسم معروف", english = "Unnamed street", ref = null)
           } else {
             rawTitle
@@ -676,7 +776,7 @@ object AheadGraphAnalyzer {
         val branchNames =
           mapped.branches.mapNotNull { br ->
             val n = br.name.primaryText ?: br.name.ref
-            if (n.isNullOrBlank() && mapped.distanceMeters <= nearGuaranteeM) {
+            if (n.isNullOrBlank()) {
               "Unnamed street"
             } else {
               n
@@ -684,7 +784,8 @@ object AheadGraphAnalyzer {
           }.distinct()
         val summary =
           when {
-            branchNames.isNotEmpty() -> branchNames.take(2).joinToString(" · ")
+            mapped.continuesAsName != null && branchNames.isEmpty() -> mapped.continuesAsName.primaryText
+            branchNames.isNotEmpty() -> branchNames.joinToString(" · ")
             mapped.branches.isNotEmpty() -> "${mapped.branches.size}"
             else -> null
           }
@@ -696,7 +797,7 @@ object AheadGraphAnalyzer {
             else -> null
           }
         AheadTimelineEntry(
-          featureIndex = if (idx < 12) idx + 1 else null,
+          featureIndex = mapped.index,
           type = mapped.effectiveDisplayType(),
           distanceMeters = mapped.distanceMeters,
           title = branchTitle,
@@ -706,13 +807,15 @@ object AheadGraphAnalyzer {
           isLandmark = false,
           primaryWayId = mapped.branches.firstOrNull()?.wayId,
           branchWayIds = mapped.branches.map { it.wayId },
+          continuesAsName = mapped.continuesAsName,
+          forkMainName = mapped.forkMainName,
         )
       }
 
-    // Part C: Named streets along the corridor within 60 m laterally (angle >= 30 deg)
-    val passByEntries =
+    // Part 2: Every street on both sides along the whole horizon within 80 m band
+    val passByScan =
       if (!shouldAbort() && System.nanoTime() <= deadlineNs && tracedSegments.isNotEmpty()) {
-        val corridorWayIds = tracedSegments.mapTo(HashSet()) { it.way.id }
+        val corridorWayIds = tracedMainWayIds
         val corridorNodeDists = HashMap<Long, Double>(tracedSegments.size * 2)
         for (seg in tracedSegments) {
           seg.nodeId1?.let { nid ->
@@ -738,20 +841,22 @@ object AheadGraphAnalyzer {
               nodeId2 = s.nodeId2,
             )
           }
-        PassByStreetDetector.detectPassByStreets(
+        PassByStreetDetector.detectPassByStreetsWithDiagnostics(
           graph = graph,
           corridorSamples = samples,
           corridorWayIds = corridorWayIds,
           corridorNodeDists = corridorNodeDists,
-          existingFeatures = filteredFeatures,
+          existingFeatures = indexed,
           dividedRoad = dividedRoadInfo,
           maxLookaheadMeters = maxLookahead,
           mode = mode,
           deadlineNs = deadlineNs,
+          dividedPartnerWayIds = dividedPartnerWayIds,
+          showMinorJunctions = showMinorJunctions,
         )
       } else {
         if (System.nanoTime() > deadlineNs) isPartialBudgetResult = true
-        emptyList()
+        PassByStreetDetector.PassByScanResult(emptyList(), emptyList(), BandRelationCounts())
       }
 
     val landmarkTimeline =
@@ -768,7 +873,7 @@ object AheadGraphAnalyzer {
         )
       }
 
-    val fullTimeline = (featureTimeline + passByEntries + landmarkTimeline).sortedBy { it.distanceMeters }
+    val fullTimeline = (featureTimeline + passByScan.entries + landmarkTimeline).sortedBy { it.distanceMeters }
 
     val tracedPathLog = buildTracedPathSegmentLogs(tracedSegments)
 
@@ -787,6 +892,8 @@ object AheadGraphAnalyzer {
         isPartialBudgetResult = isPartialBudgetResult,
         isReducedHorizon = isReducedHorizon,
         loadingAheadTileKeys = loadingAheadTileKeys.toList(),
+        bandDiagnostics = passByScan.diagnostics,
+        bandCounts = passByScan.counts,
       )
     if (!isPartialBudgetResult) {
       synchronized(compositeCacheLock) {
@@ -845,25 +952,34 @@ object AheadGraphAnalyzer {
     if (feature.type == FeatureType.SHARP_CURVE && (feature.curveAngleDeg ?: 0.0) < 60.0) {
       return true
     }
-    val alwaysShowWithinM = if (mode == TravelMode.DRIVING) 600.0 else 250.0
-    if (feature.distanceMeters <= alwaysShowWithinM) return false
-    if (highwayRank(matched.way.tags.highway) < 4) return false
+    if (feature.continuesAsName != null || feature.forkMainName != null) return false
     if (feature.type !in setOf(FeatureType.T_JUNCTION, FeatureType.Y_JUNCTION, FeatureType.SERVICE_ROAD)) return false
     val sideBranches =
       feature.branches.filter { br ->
-        br.relativeDirection != RelativeDirection.AHEAD && abs(br.bearingDeltaDeg) > 18.0
+        br.relativeDirection != RelativeDirection.AHEAD && abs(br.bearingDeltaDeg) > 15.0
       }
     if (sideBranches.isEmpty()) return false
-    return sideBranches.all { br ->
-      val hw = br.osmTags.highway?.lowercase()
-      if (hw in LINK_HIGHWAYS) return@all false
-      val r = highwayRank(hw)
-      val hasIdentity =
-        BilingualName.fromOsmTags(br.osmTags).hasAny ||
-          !br.osmTags.ref.isNullOrBlank() ||
-          !br.osmTags.destination.isNullOrBlank()
-      r in 1..2 && !hasIdentity
+    // Rule 6: Hide NOTHING in horizon except driveways & parking aisles (and beyond 1 km unnamed service alleys)
+    val allDrivewayOrParking =
+      sideBranches.all { br ->
+        br.osmTags.highway?.lowercase() == "service" &&
+          br.osmTags.service?.lowercase() in IGNORED_DRIVING_SERVICES
+      }
+    if (allDrivewayOrParking) return true
+
+    if (feature.distanceMeters > 1_000.0) {
+      val allFarUnnamedService =
+        sideBranches.all { br ->
+          val hw = br.osmTags.highway?.lowercase()
+          val hasIdentity =
+            BilingualName.fromOsmTags(br.osmTags).hasAny ||
+              !br.osmTags.ref.isNullOrBlank() ||
+              !br.osmTags.destination.isNullOrBlank()
+          hw == "service" && !hasIdentity
+        }
+      if (allFarUnnamedService) return true
     }
+    return false
   }
 
   private fun extractLandmarksAhead(
@@ -1273,6 +1389,7 @@ object AheadGraphAnalyzer {
     val isContinuationOfCurrentWay: Boolean,
     val touchesAtStart: Boolean,
     val touchesAtEnd: Boolean,
+    val outgoingForward: Boolean = true,
   )
 
   private data class NextHop(
@@ -1296,7 +1413,12 @@ object AheadGraphAnalyzer {
     }
   }
 
-  private fun isWayCountedAtNode(way: OsmWay, currentWayId: Long, mode: TravelMode): Boolean {
+  private fun isWayCountedAtNode(
+    way: OsmWay,
+    currentWayId: Long,
+    mode: TravelMode,
+    includeMinorServices: Boolean = false,
+  ): Boolean {
     if (!isRelevantForMode(way, mode)) return false
     if (mode == TravelMode.DRIVING && way.id != currentWayId) {
       val hw = way.tags.highway?.lowercase()
@@ -1332,6 +1454,7 @@ object AheadGraphAnalyzer {
     includeCurrentAhead: Boolean,
     currentIdx: Int,
     mode: TravelMode,
+    includeMinorServices: Boolean = false,
   ): List<RawEdge> {
     val result = mutableListOf<RawEdge>()
 
@@ -1350,6 +1473,7 @@ object AheadGraphAnalyzer {
             isContinuationOfCurrentWay = true,
             touchesAtStart = currentIdx == 0,
             touchesAtEnd = currentIdx == incomingWay.points.lastIndex,
+            outgoingForward = incomingForward,
           )
       }
     }
@@ -1357,7 +1481,7 @@ object AheadGraphAnalyzer {
     val waysAtNode = graph.nodeToWays[junctionNodeId].orEmpty().mapNotNull { graph.ways[it] }
     for (way in waysAtNode) {
       if (way.id == incomingWay.id) continue
-      if (!isWayCountedAtNode(way, incomingWay.id, mode)) continue
+      if (!isWayCountedAtNode(way, incomingWay.id, mode, includeMinorServices = includeMinorServices)) continue
 
       way.nodeIds.forEachIndexed { idx, nid ->
         if (nid != junctionNodeId) return@forEachIndexed
@@ -1377,6 +1501,7 @@ object AheadGraphAnalyzer {
                 isContinuationOfCurrentWay = false,
                 touchesAtStart = atStart,
                 touchesAtEnd = atEnd,
+                outgoingForward = true,
               )
           }
         }
@@ -1394,6 +1519,7 @@ object AheadGraphAnalyzer {
                 isContinuationOfCurrentWay = false,
                 touchesAtStart = atStart,
                 touchesAtEnd = atEnd,
+                outgoingForward = false,
               )
           }
         }
@@ -1445,6 +1571,7 @@ object AheadGraphAnalyzer {
     edges: List<RawEdge>,
     includeCurrentAhead: Boolean,
     mode: TravelMode,
+    nextHop: NextHop? = null,
   ): RoadFeature? {
     val node = graph.nodes[junctionNodeId]
     val nodeTags = node?.tags
@@ -1535,41 +1662,55 @@ object AheadGraphAnalyzer {
       )
     }
 
-    // Check if only a trivial continuation exists with no actual branches
-    val nonMainEdges = edges.filterNot { it.isContinuationOfCurrentWay }
-    if (nonMainEdges.isEmpty() && edges.size == 1) {
-      return null
+    // Rule 1 & 2: Identify main path continuation AND opposite divided carriageway so neither is ever listed as a branch
+    val incomingIsOneway = incomingWay.tags.effectiveOneway() in setOf("yes", "-1")
+    fun isOppositeDividedEdge(edge: RawEdge): Boolean {
+      if (!incomingIsOneway) return false
+      if (edge.isContinuationOfCurrentWay || edge.way.id == incomingWay.id) return false
+      val hw = edge.way.tags.highway?.lowercase()
+      if (hw in LINK_HIGHWAYS || hw == "service") return false
+      if (edge.way.tags.effectiveOneway() !in setOf("yes", "-1")) return false
+      return sameRoadIdentityForDivided(incomingWay.tags, edge.way.tags) && abs(edge.bearingDelta) >= 135.0
     }
 
-    val hasUTurn =
-      edges.any { edge ->
-        !edge.isContinuationOfCurrentWay &&
-          edge.way.id != incomingWay.id &&
-          abs(edge.bearingDelta) >= 145.0 &&
-          (
-            edge.way.tags.highway?.lowercase() in LINK_HIGHWAYS ||
-              junctionNodeId in roundaboutInfo.culDeSacLoopNodes ||
-              isTerminalLoopUnder25m(edge.way.points) ||
-              isMedianOpeningTurnConnector(graph, junctionNodeId, edge.way, incomingWay, mode)
-          )
+    val mainContinuationEdge =
+      edges.firstOrNull { it.isContinuationOfCurrentWay }
+        ?: nextHop?.let { nh ->
+          edges.firstOrNull { it.way.id == nh.way.id && it.outgoingForward == nh.forward }
+        }
+        ?: edges.firstOrNull { edge ->
+          !edge.isContinuationOfCurrentWay &&
+            !isOppositeDividedEdge(edge) &&
+            abs(edge.bearingDelta) <= 25.0 &&
+            hasSameRefOrName(incomingWay.tags, edge.way.tags)
+        }
+
+    val branchEdges =
+      edges.filter { edge ->
+        edge != mainContinuationEdge &&
+          !edge.isContinuationOfCurrentWay &&
+          !isOppositeDividedEdge(edge)
       }
 
-    if (edges.size == 1 && !hasUTurn) {
-      val nextWay = edges[0].way
-      if (isRoadWorksWay(nextWay)) {
+    // Check ROAD_WORKS on continuation or *_link merge into non-link main road if no side branches exist
+    val incomingIsLinkEarly = incomingWay.tags.highway?.lowercase() in LINK_HIGHWAYS
+    if (branchEdges.isEmpty()) {
+      val contWay = mainContinuationEdge?.way ?: if (edges.size == 1) edges[0].way else null
+      val contEdge = mainContinuationEdge ?: edges.firstOrNull()
+      if (contWay != null && contEdge != null && isRoadWorksWay(contWay)) {
         val nextBranch =
           RoadBranch(
             badgeId = "${featureIndex}A",
-            wayId = nextWay.id,
-            name = BilingualName.fromOsmTags(nextWay.tags),
-            leadsTo = BilingualName.destinationFromOsmTags(nextWay.tags),
+            wayId = contWay.id,
+            name = BilingualName.fromOsmTags(contWay.tags),
+            leadsTo = BilingualName.destinationFromOsmTags(contWay.tags),
             distanceMeters = distance,
             status = BranchStatus.BLOCKED,
             relativeDirection = RelativeDirection.AHEAD,
-            bearingDeltaDeg = edges[0].bearingDelta,
-            worldPoints = edges[0].worldPoints,
-            localPoints = edges[0].worldPoints.map { GeoMath.projectToHeadingFrame(junctionPoint, incomingBearing, it) },
-            osmTags = nextWay.tags,
+            bearingDeltaDeg = contEdge.bearingDelta,
+            worldPoints = contEdge.worldPoints,
+            localPoints = contEdge.worldPoints.map { GeoMath.projectToHeadingFrame(junctionPoint, incomingBearing, it) },
+            osmTags = contWay.tags,
             departurePoint = junctionPoint,
           )
         return RoadFeature(
@@ -1581,45 +1722,77 @@ object AheadGraphAnalyzer {
           incomingLocalPoints = incomingWorld.map { GeoMath.projectToHeadingFrame(junctionPoint, incomingBearing, it) },
           incomingWorldPoints = incomingWorld,
           outgoingMainLocalPoints = nextBranch.localPoints,
-          outgoingMainWorldPoints = edges[0].worldPoints,
+          outgoingMainWorldPoints = contEdge.worldPoints,
           branches = listOf(nextBranch),
-          osmTags = nextWay.tags,
-          source = nextWay.source,
-          ruleId = if (nextWay.tags.highway?.lowercase() == "construction") "osm_highway_construction" else "osm_access_no",
+          osmTags = contWay.tags,
+          source = contWay.source,
+          ruleId = if (contWay.tags.highway?.lowercase() == "construction") "osm_highway_construction" else "osm_access_no",
           confidence = 0.97,
         )
       }
-      if (nextWay.tags.highway == incomingWay.tags.highway ||
-        (nextWay.tags.highway?.lowercase() != "service" && hasSameRefOrName(incomingWay.tags, nextWay.tags))
+      if (incomingIsLinkEarly &&
+        contWay != null &&
+        contEdge != null &&
+        contWay.tags.highway?.lowercase() !in LINK_HIGHWAYS
       ) {
-        // Pure OSM way split (bridge/tunnel/speed limit/hairpin apex) -> do not emit fake junction or U-turn
-        return null
+        val mergeTargetName = BilingualName.fromOsmTags(contWay.tags).takeIf { it.hasAny }
+        return RoadFeature(
+          index = featureIndex,
+          type = FeatureType.MERGE,
+          distanceMeters = distance,
+          anchor = junctionPoint,
+          anchorNodeId = junctionNodeId,
+          incomingLocalPoints = incomingWorld.map { GeoMath.projectToHeadingFrame(junctionPoint, incomingBearing, it) },
+          incomingWorldPoints = incomingWorld,
+          outgoingMainLocalPoints = contEdge.worldPoints.map { GeoMath.projectToHeadingFrame(junctionPoint, incomingBearing, it) },
+          outgoingMainWorldPoints = contEdge.worldPoints,
+          branches = emptyList(),
+          osmTags = contWay.tags,
+          source = contWay.source,
+          ruleId = "ramp_link_merge_into_main",
+          confidence = 0.93,
+          continuesAsName = mergeTargetName,
+        )
       }
+      return null
     }
+
+    val hasUTurn =
+      branchEdges.any { edge ->
+        edge.way.id != incomingWay.id &&
+          abs(edge.bearingDelta) >= 145.0 &&
+          (
+            edge.way.tags.highway?.lowercase() in LINK_HIGHWAYS ||
+              junctionNodeId in roundaboutInfo.culDeSacLoopNodes ||
+              isTerminalLoopUnder25m(edge.way.points) ||
+              isMedianOpeningTurnConnector(graph, junctionNodeId, edge.way, incomingWay, mode)
+          )
+      }
 
     val incomingIsLink = incomingWay.tags.highway?.lowercase() in LINK_HIGHWAYS
     val hasOsmRoundabout =
       edges.any { it.way.tags.junction?.lowercase() in setOf("roundabout", "circular") } ||
         incomingWay.tags.junction?.lowercase() in setOf("roundabout", "circular")
     val geomCycleId = roundaboutInfo.roundaboutNodeToCycle[junctionNodeId]
-    val hasGeomRoundabout = geomCycleId != null
     val hasCulDeSacLoop = junctionNodeId in roundaboutInfo.culDeSacLoopNodes
 
-    val linkEdges = edges.filter { !it.isContinuationOfCurrentWay && it.way.tags.highway?.lowercase() in LINK_HIGHWAYS }
-    val nonLinkEdges = edges.filter { !it.isContinuationOfCurrentWay && it.way.tags.highway?.lowercase() !in LINK_HIGHWAYS }
+    val linkEdges = branchEdges.filter { it.way.tags.highway?.lowercase() in LINK_HIGHWAYS }
+    val nonLinkEdges = branchEdges.filter { it.way.tags.highway?.lowercase() !in LINK_HIGHWAYS }
 
-    val hasService = edges.any { it.way.tags.highway?.lowercase() == "service" }
-    val hasFootpath = mode == TravelMode.WALKING && edges.any { it.way.tags.highway?.lowercase() in WALKING_PATH_HIGHWAYS }
+    val hasService = branchEdges.any { it.way.tags.highway?.lowercase() == "service" }
+    val hasFootpath = mode == TravelMode.WALKING && branchEdges.any { it.way.tags.highway?.lowercase() in WALKING_PATH_HIGHWAYS }
     val hasFootbridge =
       mode == TravelMode.WALKING &&
-        edges.any {
+        branchEdges.any {
           it.way.tags.highway?.lowercase() in WALKING_PATH_HIGHWAYS &&
             it.way.tags.bridge != null &&
             it.way.tags.bridge != "no"
         }
 
-    val straightEdge = edges.minByOrNull { abs(it.bearingDelta) }
-    val hasStraight = straightEdge != null && abs(straightEdge.bearingDelta) <= 22.0
+    val geometryEdges = branchEdges + listOfNotNull(mainContinuationEdge)
+    val straightEdge = mainContinuationEdge ?: geometryEdges.minByOrNull { abs(it.bearingDelta) }
+    val hasStraight =
+      mainContinuationEdge != null || (straightEdge != null && abs(straightEdge.bearingDelta) <= 22.0)
 
     val outcome =
       classifyFeatureOutcome(
@@ -1631,10 +1804,10 @@ object AheadGraphAnalyzer {
         hasFootbridge = hasFootbridge,
         hasFootpath = hasFootpath,
         incomingIsLink = incomingIsLink,
-        includeCurrentAhead = includeCurrentAhead,
+        includeCurrentAhead = includeCurrentAhead || mainContinuationEdge != null,
         linkEdges = linkEdges,
         nonLinkEdges = nonLinkEdges,
-        edges = edges,
+        edges = geometryEdges,
         straightEdge = straightEdge,
         hasStraight = hasStraight,
         hasService = hasService,
@@ -1645,10 +1818,11 @@ object AheadGraphAnalyzer {
       visitedRoundaboutCycles += outcome.roundaboutCycleId
     }
 
-    val sortedEdges = edges.sortedBy { it.bearingDelta }
+    // Branches NEVER include mainContinuationEdge or opposite carriageway
+    val sortedBranchEdges = branchEdges.sortedBy { it.bearingDelta }
 
     val branches =
-      sortedEdges.mapIndexed { idx, edge ->
+      sortedBranchEdges.mapIndexed { idx, edge ->
         val relDir =
           when {
             edge.bearingDelta < -18.0 -> RelativeDirection.LEFT
@@ -1668,10 +1842,23 @@ object AheadGraphAnalyzer {
           localPoints = edge.worldPoints.map { GeoMath.projectToHeadingFrame(junctionPoint, incomingBearing, it) },
           osmTags = edge.way.tags,
           departurePoint = junctionPoint,
+          isMainContinuation = false,
         )
       }
 
-    val mainOut = if (hasStraight) straightEdge.worldPoints else emptyList()
+    val mainOut =
+      mainContinuationEdge?.worldPoints
+        ?: if (hasStraight && straightEdge != null) straightEdge.worldPoints else emptyList()
+
+    val forkMainName =
+      if (outcome.type == FeatureType.FORK && mainContinuationEdge != null) {
+        val candName = BilingualName.fromOsmTags(mainContinuationEdge.way.tags)
+        if (candName.hasAny) candName
+        else BilingualName.fromOsmTags(incomingWay.tags).takeIf { it.hasAny }
+          ?: BilingualName(arabic = "الطريق الرئيسي", english = "Main", ref = null)
+      } else {
+        null
+      }
 
     return RoadFeature(
       index = featureIndex,
@@ -1694,6 +1881,7 @@ object AheadGraphAnalyzer {
         },
       ruleId = outcome.ruleId,
       confidence = outcome.confidence,
+      forkMainName = forkMainName,
     )
   }
 

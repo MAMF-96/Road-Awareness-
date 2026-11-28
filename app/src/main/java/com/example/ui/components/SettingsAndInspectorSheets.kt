@@ -1873,6 +1873,46 @@ fun GraphInspectorBottomSheet(
                       modifier = Modifier.testTag("inspector_unreachable_links"),
                     )
                   }
+                  val bCounts = uiState.bandCounts
+                  Text(
+                    text =
+                      String.format(
+                        Locale.US,
+                        "Band <=80m: direct=%d viaSlow=%d median=%d over=%d noLink=%d (total=%d)",
+                        bCounts.direct,
+                        bCounts.viaSlowRoad,
+                        bCounts.acrossMedian,
+                        bCounts.overpass,
+                        bCounts.notConnected,
+                        uiState.bandDiagnostics.size,
+                      ),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 11.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.testTag("inspector_band_80m_summary"),
+                  )
+                  uiState.bandDiagnostics.forEach { bd ->
+                    Text(
+                      text =
+                        String.format(
+                          Locale.US,
+                          "  [%s] %s (%s) @%.0fm lat=%.0fm ang=%.0f° · %s",
+                          if (bd.included) "IN" else "EX",
+                          bd.name.take(26),
+                          bd.highway,
+                          bd.alongDistMeters,
+                          bd.lateralMeters,
+                          bd.angleDeg,
+                          bd.reason,
+                        ),
+                      fontFamily = FontFamily.Monospace,
+                      fontSize = 9.sp,
+                      lineHeight = 11.sp,
+                      color = if (bd.included) MaterialTheme.colorScheme.onSurfaceVariant else roadColors.unverifiedText,
+                    )
+                  }
                   val pStats = uiState.pipelineDiagnostics.planarizeStats
                   Text(
                     text =
@@ -3619,6 +3659,33 @@ internal fun buildInspectorPlainText(uiState: RoadHudUiState): String {
       uiState.pipelineDiagnostics.repoLockMaxWaitMs,
       uiState.pipelineDiagnostics.repoLockMaxHoldMs,
     )
+  val bCounts = uiState.bandCounts
+  lines +=
+    String.format(
+      Locale.US,
+      "band80m: direct=%d viaSlow=%d median=%d over=%d noLink=%d diag=%d",
+      bCounts.direct,
+      bCounts.viaSlowRoad,
+      bCounts.acrossMedian,
+      bCounts.overpass,
+      bCounts.notConnected,
+      uiState.bandDiagnostics.size,
+    )
+  uiState.bandDiagnostics.forEach { bd ->
+    lines +=
+      String.format(
+        Locale.US,
+        "  [%s] w=%d %s (%s) @%.0fm lat=%.0fm ang=%.0f°: %s",
+        if (bd.included) "IN" else "EX",
+        bd.wayId,
+        bd.name.take(28),
+        bd.highway,
+        bd.alongDistMeters,
+        bd.lateralMeters,
+        bd.angleDeg,
+        bd.reason,
+      )
+  }
   computeDiagnosticReason(uiState)?.let { reason ->
     lines += "status=${reason.take(96)}"
   }

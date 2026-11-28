@@ -353,8 +353,8 @@ class LayoutResponsivenessTest {
     assertTrue("Edge-to-edge map must fill root ($mapWidth x $mapHeight vs ${rootBounds.width} x ${rootBounds.height})",
       abs(mapHeight - rootBounds.height) <= 2f && abs(mapWidth - rootBounds.width) <= 2f)
 
-    // 2. Side panel dimensions: clamp(34%, 300dp, 420dp), full height minus 8dp margins
-    val expectedWidth = (rootBounds.width * 0.34f).coerceIn(300f, 420f)
+    // 2. Side panel dimensions: clamp(45%, 320dp, 560dp), full height minus 8dp margins
+    val expectedWidth = (rootBounds.width * 0.45f).coerceIn(320f, 560f)
     assertTrue("Side panel width (${panelBounds.width}) expected ~$expectedWidth", abs(panelBounds.width - expectedWidth) <= 3f)
     assertTrue("Side panel height (${panelBounds.height}) expected ~${rootBounds.height - 16f}",
       abs(panelBounds.height - (rootBounds.height - 16f)) <= 4f)

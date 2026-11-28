@@ -324,4 +324,22 @@
     <string name="action_reset">Reset</string>
     <string name="inspector_last_exit">Last exit</string>
     <string name="inspector_last_exit_none">No crash or unexpected exit recorded</string>
+
+    <!-- Fix Pass 2: Main path, Slow roads, Relations & Whole road -->
+    <string name="ladder_road_continues_as">Road continues as %1$s</string>
+    <string name="ladder_main_branch_tag">Main</string>
+    <string name="ladder_divided_road_note">Divided road</string>
+    <string name="ladder_slow_road_left">Slow road (left)</string>
+    <string name="ladder_slow_road_right">Slow road (right)</string>
+    <string name="relation_direct">Direct</string>
+    <string name="relation_via_slow_road">Via slow road</string>
+    <string name="relation_across_median">Across median</string>
+    <string name="relation_overpass">Overpass</string>
+    <string name="relation_not_connected">Not connected</string>
+    <string name="action_whole_road">Whole road</string>
+    <string name="whole_road_title">Whole road</string>
+    <string name="whole_road_counts_format">Left: %1$d · Right: %2$d</string>
+    <string name="whole_road_horizon_label">Horizon</string>
+    <string name="whole_road_empty">No streets ahead in horizon</string>
+    <string name="whole_road_show_minor">Show minor</string>
 </resources>

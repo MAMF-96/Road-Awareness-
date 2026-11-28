@@ -142,6 +142,8 @@ fun IllustrationPanel(
   onRetryRoadData: () -> Unit = {},
   onOpenInspectorSpots: () -> Unit = {},
   onToggleOverview: () -> Unit = {},
+  windowWidthDp: Int = 400,
+  onOpenWholeRoad: () -> Unit = {},
   modifier: Modifier = Modifier,
 ) {
   val selectedFeature = uiState.selectedFeature
@@ -183,6 +185,8 @@ fun IllustrationPanel(
         onRetryRoadData = onRetryRoadData,
         onOpenInspectorSpots = onOpenInspectorSpots,
         onToggleOverview = onToggleOverview,
+        windowWidthDp = windowWidthDp,
+        onOpenWholeRoad = onOpenWholeRoad,
       )
     } else {
       PortraitAndTabletCardContent(
@@ -200,6 +204,8 @@ fun IllustrationPanel(
         onRetryRoadData = onRetryRoadData,
         onOpenInspectorSpots = onOpenInspectorSpots,
         onToggleOverview = onToggleOverview,
+        windowWidthDp = windowWidthDp,
+        onOpenWholeRoad = onOpenWholeRoad,
       )
     }
   }
@@ -221,6 +227,8 @@ private fun PortraitAndTabletCardContent(
   onRetryRoadData: () -> Unit,
   onOpenInspectorSpots: () -> Unit,
   onToggleOverview: () -> Unit,
+  windowWidthDp: Int,
+  onOpenWholeRoad: () -> Unit,
 ) {
   val offRoad = uiState.offRoadState
   val displayRoadCandidate = uiState.matchResult.primary ?: offRoad.selectedCandidate?.candidate
@@ -383,6 +391,10 @@ private fun PortraitAndTabletCardContent(
           onExpandRequest = { onToggleExpand(true) },
           textSize = uiState.settings.ladderTextSize,
           nameOrder = uiState.settings.nameOrder,
+          isDividedRoad = uiState.isDividedRoad,
+          isLandscape = false,
+          windowWidthDp = windowWidthDp,
+          onOpenWholeRoad = onOpenWholeRoad,
           modifier = Modifier.fillMaxSize(),
         )
       }
@@ -583,6 +595,8 @@ private fun LandscapeSidePanelContent(
   onRetryRoadData: () -> Unit,
   onOpenInspectorSpots: () -> Unit,
   onToggleOverview: () -> Unit,
+  windowWidthDp: Int,
+  onOpenWholeRoad: () -> Unit,
 ) {
   val offRoad = uiState.offRoadState
   val displayRoadCandidate = uiState.matchResult.primary ?: offRoad.selectedCandidate?.candidate
@@ -828,6 +842,10 @@ private fun LandscapeSidePanelContent(
                 onExpandRequest = { onToggleExpand(true) },
                 textSize = uiState.settings.ladderTextSize,
                 nameOrder = uiState.settings.nameOrder,
+                isDividedRoad = uiState.isDividedRoad,
+                isLandscape = true,
+                windowWidthDp = windowWidthDp,
+                onOpenWholeRoad = onOpenWholeRoad,
                 modifier = Modifier.fillMaxSize(),
               )
             }

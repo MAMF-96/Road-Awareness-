@@ -121,6 +121,74 @@ fun AutoShrinkSingleLineText(
 }
 
 /**
+ * Auto-shrinks text from [preferredFontSize] down to [minFontSize] (default 15.sp) until it fits
+ * within [maxLines] (default 3) using normal word wrapping and TextOverflow.Clip (never ellipsis).
+ */
+@Composable
+fun AutoShrinkMultilineText(
+  text: String,
+  preferredFontSize: TextUnit,
+  minFontSize: TextUnit = 15.sp,
+  fontWeight: FontWeight,
+  color: Color,
+  fontFamily: FontFamily = RobotoFontFamily,
+  maxLines: Int = 3,
+  textAlign: TextAlign = TextAlign.Start,
+  modifier: Modifier = Modifier,
+) {
+  val textMeasurer = rememberTextMeasurer()
+  val density = LocalDensity.current
+
+  BoxWithConstraints(modifier = modifier) {
+    val maxWidthPx = with(density) { maxWidth.toPx() }.toInt().coerceAtLeast(1)
+    val chosenSize =
+      remember(text, maxWidthPx, preferredFontSize, minFontSize, fontWeight, fontFamily, maxLines) {
+        val maxSp = preferredFontSize.value
+        val minSp = minFontSize.value.coerceAtMost(maxSp)
+        var sizeSp = maxSp
+        var found = minSp
+        while (sizeSp >= minSp - 0.01f) {
+          val candidate = sizeSp.coerceAtLeast(minSp).sp
+          val result =
+            textMeasurer.measure(
+              text = text,
+              style =
+                TextStyle(
+                  fontFamily = fontFamily,
+                  fontSize = candidate,
+                  lineHeight = candidate * 1.15f,
+                  fontWeight = fontWeight,
+                ),
+              maxLines = maxLines,
+              softWrap = true,
+              constraints = Constraints(maxWidth = maxWidthPx),
+            )
+          if (!result.hasVisualOverflow) {
+            found = sizeSp.coerceAtLeast(minSp)
+            break
+          }
+          sizeSp -= 1f
+        }
+        found.sp
+      }
+
+    Text(
+      text = text,
+      fontFamily = fontFamily,
+      fontSize = chosenSize,
+      lineHeight = chosenSize * 1.15f,
+      fontWeight = fontWeight,
+      color = color,
+      maxLines = maxLines,
+      softWrap = true,
+      overflow = TextOverflow.Clip,
+      textAlign = textAlign,
+      modifier = Modifier.fillMaxWidth(),
+    )
+  }
+}
+
+/**
  * Full-width header bilingual stack:
  * - Ordered per [NameOrder] (AUTO / ARABIC_FIRST / ENGLISH_FIRST)
  * - Case-insensitive duplicate collapse when Arabic & English are identical

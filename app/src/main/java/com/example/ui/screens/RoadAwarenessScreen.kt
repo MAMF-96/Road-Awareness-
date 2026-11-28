@@ -1,7 +1,10 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.app.UiModeManager
+import android.content.Context
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.os.Build
 import android.util.Log
 import androidx.activity.compose.BackHandler
@@ -122,6 +125,7 @@ import com.example.ui.components.SearchBottomSheet
 import com.example.ui.components.SettingsBottomSheet
 import com.example.ui.components.TouchTelemetry
 import com.example.ui.components.TuneCameraSheet
+import com.example.ui.components.WholeRoadSheet
 import com.example.ui.components.formatRoadDistance
 import com.example.ui.components.innerPressScale
 import com.example.ui.components.rememberPressHapticInteractionSource
@@ -197,7 +201,8 @@ fun RoadAwarenessScreen(
 
   BackHandler(
     enabled =
-      uiState.isTuneCameraOpen ||
+      uiState.isWholeRoadOpen ||
+        uiState.isTuneCameraOpen ||
         uiState.isSearchOpen ||
         uiState.isPinsSheetOpen ||
         uiState.isSettingsOpen ||
@@ -207,6 +212,7 @@ fun RoadAwarenessScreen(
         uiState.offRoadState.selectedCandidate != null,
   ) {
     when {
+      uiState.isWholeRoadOpen -> viewModel.openWholeRoad(false)
       uiState.isTuneCameraOpen -> viewModel.openTuneCamera(false)
       uiState.isSearchOpen -> viewModel.openSearch(false)
       uiState.isPinsSheetOpen -> viewModel.openPinsSheet(false)
@@ -408,6 +414,10 @@ fun RoadAwarenessScreen(
     onToggleShowDataSourceChips = { viewModel.setShowDataSourceChips(it) },
     onToggleOverview = { viewModel.toggleOverviewMode() },
     onToggleShowGraphEdges = { viewModel.setShowGraphEdges(it) },
+    onOpenWholeRoad = { viewModel.openWholeRoad(it) },
+    onDisplayContextChanged = { widthDp, isCarOrTv ->
+      viewModel.updateDisplayContext(widthDp, isCarOrTv)
+    },
     onReportCopied = {
       scope.launch {
         snackbarHostState.currentSnackbarData?.dismiss()
@@ -542,6 +552,8 @@ fun RoadAwarenessScreenContent(
   onToggleShowDataSourceChips: (Boolean) -> Unit = {},
   onToggleOverview: () -> Unit = {},
   onToggleShowGraphEdges: (Boolean) -> Unit = {},
+  onOpenWholeRoad: (Boolean) -> Unit = {},
+  onDisplayContextChanged: (Int, Boolean) -> Unit = { _, _ -> },
   onReportCopied: () -> Unit = {},
   isPanelExpandedOverride: Boolean? = null,
   onPanelExpandedChange: ((Boolean) -> Unit)? = null,
@@ -562,6 +574,7 @@ fun RoadAwarenessScreenContent(
   LaunchedEffect(
     uiState.travelMode,
     wakeTick,
+    uiState.isWholeRoadOpen,
     uiState.isSearchOpen,
     uiState.isPinsSheetOpen,
     uiState.isSettingsOpen,
@@ -569,6 +582,7 @@ fun RoadAwarenessScreenContent(
   ) {
     controlsVisible = true
     if (uiState.travelMode == TravelMode.DRIVING &&
+      !uiState.isWholeRoadOpen &&
       !uiState.isSearchOpen &&
       !uiState.isPinsSheetOpen &&
       !uiState.isSettingsOpen &&
@@ -633,6 +647,16 @@ fun RoadAwarenessScreenContent(
       val shortestSide = minOf(maxWidth, maxHeight)
       val isTablet = shortestSide >= 600.dp
 
+      val screenContext = LocalContext.current
+      val isCarOrTvMode = remember(screenContext) {
+        val uiModeMgr = screenContext.getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager
+        val mode = uiModeMgr?.currentModeType ?: Configuration.UI_MODE_TYPE_NORMAL
+        mode == Configuration.UI_MODE_TYPE_CAR || mode == Configuration.UI_MODE_TYPE_TELEVISION
+      }
+      LaunchedEffect(winWidthDp, isCarOrTvMode) {
+        onDisplayContextChanged(winWidthDp, isCarOrTvMode)
+      }
+
       val safeLeftDp = safePadding.calculateLeftPadding(LayoutDirection.Ltr)
       val safeRightDp = safePadding.calculateRightPadding(LayoutDirection.Ltr)
       val safeBottomDp = safePadding.calculateBottomPadding()
@@ -671,7 +695,7 @@ fun RoadAwarenessScreenContent(
         label = "landscapePanelSwap",
       )
 
-      val landscapePanelWidthDp = (totalWidth * 0.34f).coerceIn(300.dp, 420.dp)
+      val landscapePanelWidthDp = (totalWidth * 0.45f).coerceIn(320.dp, 560.dp)
       val landscapePanelWidthPx = with(density) { landscapePanelWidthDp.toPx() }
       val panelLeftPosDp = safeLeftDp + 8.dp
       val panelRightPosDp = (totalWidth - safeRightDp - 8.dp - landscapePanelWidthDp).coerceAtLeast(safeLeftDp)
@@ -814,6 +838,8 @@ fun RoadAwarenessScreenContent(
                   onRetryRoadData = onRetryRoadData,
                   onOpenInspectorSpots = onOpenInspectorSpots,
                   onToggleOverview = onToggleOverview,
+                  windowWidthDp = winWidthDp,
+                  onOpenWholeRoad = { onOpenWholeRoad(true) },
                   modifier = Modifier.fillMaxSize(),
                 )
               }
@@ -1122,6 +1148,8 @@ fun RoadAwarenessScreenContent(
           onRetryRoadData = onRetryRoadData,
           onOpenInspectorSpots = onOpenInspectorSpots,
           onToggleOverview = onToggleOverview,
+          windowWidthDp = winWidthDp,
+          onOpenWholeRoad = { onOpenWholeRoad(true) },
           modifier =
             Modifier
               .align(Alignment.TopCenter)
@@ -1459,6 +1487,27 @@ fun RoadAwarenessScreenContent(
           onResetDebugOverrides = onResetDebugOverrides,
           onClearCache = onClearCache,
           onDismiss = { onOpenSettings(false) },
+        )
+      }
+
+      if (uiState.isWholeRoadOpen) {
+        WholeRoadSheet(
+          features = uiState.features,
+          timelineEntries = uiState.timelineEntries,
+          selectedFeatureIndex = uiState.selectedFeatureIndex,
+          unitSystem = uiState.effectiveUnitSystem,
+          horizonMeters = uiState.lookaheadMeters,
+          showMinorJunctions = uiState.settings.showMinorJunctions,
+          isDividedRoad = uiState.isDividedRoad,
+          horizonStoppedAtUnloadedBorder = uiState.horizonStoppedAtUnloadedBorder,
+          textSize = uiState.settings.ladderTextSize,
+          nameOrder = uiState.settings.nameOrder,
+          isLandscape = isLandscape,
+          windowWidthDp = winWidthDp,
+          onSelectFeature = onSelectFeature,
+          onSelectHorizon = onSelectHorizon,
+          onToggleShowMinor = onToggleShowMinorJunctions,
+          onDismiss = { onOpenWholeRoad(false) },
         )
       }
 

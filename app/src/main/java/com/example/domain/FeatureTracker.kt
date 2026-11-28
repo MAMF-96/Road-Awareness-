@@ -16,6 +16,7 @@ class FeatureTracker {
   private data class TrackedFeature(
     val key: String,
     var feature: RoadFeature,
+    var signedDistanceMeters: Double = feature.distanceMeters,
     var missingPasses: Int = 0,
     var firstMissingAtMs: Long = 0L,
     var lastSeenAtMs: Long = 0L,
@@ -24,6 +25,7 @@ class FeatureTracker {
   private data class TrackedPassBy(
     val key: String,
     var entry: AheadTimelineEntry,
+    var signedDistanceMeters: Double = entry.distanceMeters,
     var missingPasses: Int = 0,
     var firstMissingAtMs: Long = 0L,
   )
@@ -100,21 +102,23 @@ class FeatureTracker {
     var dropped = 0
     while (featIter.hasNext()) {
       val tracked = featIter.next().value
-      val newDist = tracked.feature.distanceMeters - delta
+      val newDist = tracked.signedDistanceMeters - delta
       if (newDist < -25.0) {
         featIter.remove()
         dropped++
       } else {
+        tracked.signedDistanceMeters = newDist
         tracked.feature = tracked.feature.copy(distanceMeters = newDist.coerceAtLeast(0.0))
       }
     }
     val passIter = trackedPassBys.entries.iterator()
     while (passIter.hasNext()) {
       val tracked = passIter.next().value
-      val newDist = tracked.entry.distanceMeters - delta
+      val newDist = tracked.signedDistanceMeters - delta
       if (newDist < -25.0) {
         passIter.remove()
       } else {
+        tracked.signedDistanceMeters = newDist
         tracked.entry = tracked.entry.copy(distanceMeters = newDist.coerceAtLeast(0.0))
       }
     }
@@ -285,6 +289,7 @@ class FeatureTracker {
       val existing = trackedFeatures[key]
       if (existing != null) {
         existing.feature = feat
+        existing.signedDistanceMeters = feat.distanceMeters
         existing.missingPasses = 0
         existing.firstMissingAtMs = 0L
         existing.lastSeenAtMs = nowMs
@@ -294,6 +299,7 @@ class FeatureTracker {
           TrackedFeature(
             key = key,
             feature = feat,
+            signedDistanceMeters = feat.distanceMeters,
             missingPasses = 0,
             firstMissingAtMs = 0L,
             lastSeenAtMs = nowMs,
@@ -313,7 +319,7 @@ class FeatureTracker {
         continue
       }
 
-      if (tracked.feature.distanceMeters < -25.0) {
+      if (tracked.signedDistanceMeters < -25.0) {
         featIter.remove()
         dropped++
         lastDropReason = "passed"
@@ -342,16 +348,21 @@ class FeatureTracker {
       val ex = trackedPassBys[key]
       if (ex != null) {
         ex.entry = entry
+        ex.signedDistanceMeters = entry.distanceMeters
         ex.missingPasses = 0
         ex.firstMissingAtMs = 0L
       } else {
-        trackedPassBys[key] = TrackedPassBy(key = key, entry = entry)
+        trackedPassBys[key] = TrackedPassBy(key = key, entry = entry, signedDistanceMeters = entry.distanceMeters)
       }
     }
     val passIter = trackedPassBys.entries.iterator()
     while (passIter.hasNext()) {
       val tracked = passIter.next().value
       if (tracked.key in newPassKeys) continue
+      if (tracked.signedDistanceMeters < -25.0) {
+        passIter.remove()
+        continue
+      }
       if (isPartial && tracked.entry.distanceMeters > maxNewDist - 5.0) continue
       if (tracked.firstMissingAtMs == 0L) tracked.firstMissingAtMs = nowMs
       tracked.missingPasses++
@@ -413,16 +424,25 @@ class FeatureTracker {
     val baseNonPassBy =
       sortedFeatures.map { feat ->
         val existingEntry = baseTimeline.firstOrNull { !it.isPassByStreet && it.featureIndex == feat.index }
-        existingEntry?.copy(distanceMeters = feat.distanceMeters)
+        existingEntry?.copy(
+          distanceMeters = feat.distanceMeters,
+          continuesAsName = existingEntry.continuesAsName ?: feat.continuesAsName,
+          forkMainName = existingEntry.forkMainName ?: feat.forkMainName,
+        )
           ?: AheadTimelineEntry(
             distanceMeters = feat.distanceMeters,
             type = feat.effectiveDisplayType(),
-            title = feat.branches.firstOrNull()?.name ?: com.example.data.model.BilingualName.fromOsmTags(feat.osmTags),
-            branchSummary = feat.branches.firstOrNull()?.name?.primaryText,
+            title = feat.continuesAsName
+              ?: feat.branches.firstOrNull()?.name
+              ?: com.example.data.model.BilingualName.fromOsmTags(feat.osmTags),
+            branchSummary = feat.continuesAsName?.primaryText ?: feat.branches.firstOrNull()?.name?.primaryText,
             status = feat.branches.firstOrNull()?.status,
             featureIndex = feat.index,
             primaryWayId = feat.branches.firstOrNull()?.wayId,
+            branchWayIds = feat.branches.map { it.wayId },
             anchor = feat.anchor,
+            continuesAsName = feat.continuesAsName,
+            forkMainName = feat.forkMainName,
           )
       }
     val passByList = trackedPassBys.values.map { it.entry }

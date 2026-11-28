@@ -19,6 +19,8 @@ import com.example.data.local.SettingsRepository
 import com.example.data.local.UserSettings
 import com.example.data.model.AheadAnalysisResult
 import com.example.data.model.AheadTimelineEntry
+import com.example.data.model.BandRelationCounts
+import com.example.data.model.BandRoadDiagnostic
 import com.example.data.model.BilingualName
 import com.example.data.model.ChaseCameraDistance
 import com.example.data.model.DebugEdgeCategory
@@ -145,6 +147,8 @@ data class RoadHudUiState(
   val hasConfirmedEmptyAhead: Boolean = false,
   val horizonStoppedAtUnloadedBorder: Boolean = false,
   val nearbyUnreachableLinks: List<String> = emptyList(),
+  val bandDiagnostics: List<BandRoadDiagnostic> = emptyList(),
+  val bandCounts: BandRelationCounts = BandRelationCounts(),
   val isReducedHorizon: Boolean = false,
   val isPartialBudgetResult: Boolean = false,
   val unsnappedCorridorEndpoints: Int = 0,
@@ -165,6 +169,7 @@ data class RoadHudUiState(
   val isSearchOpen: Boolean = false,
   val isPinsSheetOpen: Boolean = false,
   val isSettingsOpen: Boolean = false,
+  val isWholeRoadOpen: Boolean = false,
   val isTuneCameraOpen: Boolean = false,
   val isInspectorOpen: Boolean = false,
   val autoLowQualityActive: Boolean = false,
@@ -699,6 +704,29 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
   fun openSettings(open: Boolean) {
     if (open) refreshCacheCount()
     _uiState.update { it.copy(isSettingsOpen = open) }
+  }
+
+  fun openWholeRoad(open: Boolean) {
+    _uiState.update {
+      it.copy(
+        isWholeRoadOpen = open,
+        isSettingsOpen = if (open) false else it.isSettingsOpen,
+      )
+    }
+  }
+
+  fun updateDisplayContext(screenWidthDp: Int, isCarOrTvMode: Boolean) {
+    _uiState.update { state ->
+      if (!state.settings.ladderTextSizeCustomized && (screenWidthDp >= 800 || isCarOrTvMode)) {
+        if (state.settings.ladderTextSize != LadderTextSize.EXTRA_LARGE) {
+          state.copy(settings = state.settings.copy(ladderTextSize = LadderTextSize.EXTRA_LARGE))
+        } else {
+          state
+        }
+      } else {
+        state
+      }
+    }
   }
 
   fun openTuneCamera(open: Boolean) {
@@ -1449,7 +1477,7 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
   }
 
   fun setLadderTextSize(size: LadderTextSize) {
-    _uiState.update { it.copy(settings = it.settings.copy(ladderTextSize = size)) }
+    _uiState.update { it.copy(settings = it.settings.copy(ladderTextSize = size, ladderTextSizeCustomized = true)) }
     viewModelScope.launch { settingsRepo.setLadderTextSize(size) }
   }
 
@@ -2963,6 +2991,8 @@ class RoadAwarenessViewModel(application: Application) : AndroidViewModel(applic
             hasConfirmedEmptyAhead = output.hasConfirmedEmptyAhead,
             horizonStoppedAtUnloadedBorder = detailed?.horizonStoppedAtUnloadedBorder ?: false,
             nearbyUnreachableLinks = detailed?.nearbyUnreachableLinks ?: emptyList(),
+            bandDiagnostics = detailed?.bandDiagnostics ?: emptyList(),
+            bandCounts = detailed?.bandCounts ?: BandRelationCounts(),
             isReducedHorizon = detailed?.isReducedHorizon ?: (snap.graph.ways.size > 8_000),
             isPartialBudgetResult = detailed?.isPartialBudgetResult ?: false,
             unsnappedCorridorEndpoints = output.unsnappedCorridorEndpoints,

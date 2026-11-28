@@ -62,6 +62,7 @@ data class UserSettings(
   val keepScreenOn: Boolean = true,
   val backgroundTrackingWhileDriving: Boolean = true,
   val ladderTextSize: LadderTextSize = LadderTextSize.LARGE,
+  val ladderTextSizeCustomized: Boolean = false,
   val nameOrder: NameOrder = NameOrder.AUTO,
   val showDataSourceChips: Boolean = false,
   val qualitySetting: QualitySetting = QualitySetting.AUTO,
@@ -105,6 +106,7 @@ class SettingsRepository(private val context: Context) {
   private val keyKeepScreenOn = booleanPreferencesKey("keep_screen_on")
   private val keyBackgroundTrackingWhileDriving = booleanPreferencesKey("background_tracking_while_driving")
   private val keyLadderTextSize = stringPreferencesKey("ladder_text_size")
+  private val keyLadderTextSizeCustomized = booleanPreferencesKey("ladder_text_size_customized")
   private val keyNameOrder = stringPreferencesKey("name_order")
   private val keyShowDataSourceChips = booleanPreferencesKey("show_data_source_chips")
   private val keyQualitySetting = stringPreferencesKey("quality_setting")
@@ -185,6 +187,7 @@ class SettingsRepository(private val context: Context) {
         ladderTextSize =
           runCatching { LadderTextSize.valueOf(prefs[keyLadderTextSize] ?: LadderTextSize.LARGE.name) }
             .getOrDefault(LadderTextSize.LARGE),
+        ladderTextSizeCustomized = prefs[keyLadderTextSizeCustomized] ?: false,
         nameOrder =
           runCatching { NameOrder.valueOf(prefs[keyNameOrder] ?: NameOrder.AUTO.name) }
             .getOrDefault(NameOrder.AUTO),
@@ -346,7 +349,10 @@ class SettingsRepository(private val context: Context) {
   }
 
   suspend fun setLadderTextSize(size: LadderTextSize) {
-    context.settingsDataStore.edit { it[keyLadderTextSize] = size.name }
+    context.settingsDataStore.edit {
+      it[keyLadderTextSize] = size.name
+      it[keyLadderTextSizeCustomized] = true
+    }
   }
 
   suspend fun setNameOrder(order: NameOrder) {

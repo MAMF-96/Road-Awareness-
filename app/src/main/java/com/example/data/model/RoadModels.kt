@@ -552,6 +552,7 @@ data class RoadBranch(
   val osmTags: OsmTags,
   val isAcrossMedian: Boolean = false,
   val departurePoint: GeoPoint? = null,
+  val isMainContinuation: Boolean = false,
 )
 
 @Immutable
@@ -585,6 +586,8 @@ data class RoadFeature(
   val dualCarriagewayOffsetMeters: Double? = null,
   val frontageSide: RelativeDirection? = null,
   val hiddenSubFeatures: List<RoadFeature> = emptyList(),
+  val continuesAsName: BilingualName? = null,
+  val forkMainName: BilingualName? = null,
 ) {
   fun isInterchangeGroup(): Boolean =
     type == FeatureType.INTERCHANGE ||
@@ -629,6 +632,32 @@ data class AheadTimelineEntry(
   val passBySide: RelativeDirection? = null,
   val passByRelation: PassByRelation? = null,
   val passByLateralMeters: Double? = null,
+  val continuesAsName: BilingualName? = null,
+  val forkMainName: BilingualName? = null,
+  val isSlowRoadStretch: Boolean = false,
+  val slowRoadEndDistMeters: Double? = null,
+)
+
+@Immutable
+data class BandRoadDiagnostic(
+  val wayId: Long,
+  val name: String,
+  val highway: String,
+  val angleDeg: Double,
+  val lateralMeters: Double,
+  val alongDistMeters: Double,
+  val relation: PassByRelation?,
+  val included: Boolean,
+  val reason: String,
+)
+
+@Immutable
+data class BandRelationCounts(
+  val direct: Int = 0,
+  val viaSlowRoad: Int = 0,
+  val acrossMedian: Int = 0,
+  val overpass: Int = 0,
+  val notConnected: Int = 0,
 )
 
 @Immutable
@@ -667,6 +696,8 @@ data class AheadAnalysisResult(
   val isPartialBudgetResult: Boolean = false,
   val isReducedHorizon: Boolean = false,
   val loadingAheadTileKeys: List<String> = emptyList(),
+  val bandDiagnostics: List<BandRoadDiagnostic> = emptyList(),
+  val bandCounts: BandRelationCounts = BandRelationCounts(),
 )
 
 enum class SearchScope {

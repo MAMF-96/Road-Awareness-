@@ -324,4 +324,22 @@
     <string name="action_reset">إعادة ضبط</string>
     <string name="inspector_last_exit">آخر خروج</string>
     <string name="inspector_last_exit_none">لم يُسجَّل أي عطل أو خروج غير متوقع</string>
+
+    <!-- Fix Pass 2: Main path, Slow roads, Relations & Whole road -->
+    <string name="ladder_road_continues_as">يستمر الطريق باسم %1$s</string>
+    <string name="ladder_main_branch_tag">الرئيسي</string>
+    <string name="ladder_divided_road_note">طريق مفصول</string>
+    <string name="ladder_slow_road_left">طريق بطيء (يسار)</string>
+    <string name="ladder_slow_road_right">طريق بطيء (يمين)</string>
+    <string name="relation_direct">مباشر</string>
+    <string name="relation_via_slow_road">عبر الطريق البطيء</string>
+    <string name="relation_across_median">عبر الجزيرة</string>
+    <string name="relation_overpass">جسر علوي</string>
+    <string name="relation_not_connected">غير متصل</string>
+    <string name="action_whole_road">الطريق كاملًا</string>
+    <string name="whole_road_title">الطريق كاملًا</string>
+    <string name="whole_road_counts_format">يسار: %1$d · يمين: %2$d</string>
+    <string name="whole_road_horizon_label">المدى</string>
+    <string name="whole_road_empty">لا شوارع أمامك ضمن المدى</string>
+    <string name="whole_road_show_minor">إظهار الفرعية</string>
 </resources>

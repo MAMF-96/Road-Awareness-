@@ -70,13 +70,13 @@ class RoadClassificationPureTest {
     assertNotNull(drivingMatch)
     val drivingFeatures = AheadGraphAnalyzer.analyzeAhead(graph, drivingMatch!!, TravelMode.DRIVING, 12.0)
     assertEquals(FeatureType.FOUR_WAY, drivingFeatures.first().type)
-    assertEquals(3, drivingFeatures.first().branches.size)
+    assertEquals(2, drivingFeatures.first().branches.size)
 
     val walkingMatch = MapMatcher.match(graph, pos, 0.0, TravelMode.WALKING, null).primary
     assertNotNull(walkingMatch)
     val walkingFeatures = AheadGraphAnalyzer.analyzeAhead(graph, walkingMatch!!, TravelMode.WALKING, 1.4)
     assertEquals(FeatureType.MULTI_WAY, walkingFeatures.first().type)
-    assertEquals(4, walkingFeatures.first().branches.size)
+    assertEquals(3, walkingFeatures.first().branches.size)
   }
 
   @Test
